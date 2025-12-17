@@ -13,9 +13,11 @@ export class LighterTracker implements DurableObject {
   private ws: WebSocket | null = null;
   private reconnectTimeout: number | null = null;
   private snapshotInterval: number | null = null;
+  private statusCheckInterval: number | null = null;
   private dataBuffer: Map<string, LighterMarketStats> = new Map();
   private isConnected = false;
   private reconnectAttempts = 0;
+  private messageCount = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 10;
   private readonly RECONNECT_DELAY = 5000;
 
@@ -35,6 +37,7 @@ export class LighterTracker implements DurableObject {
         console.error('[LighterTracker] Auto-start failed:', error);
       });
       this.startSnapshotTimer();
+      this.startStatusCheck();
     }
 
     // Handle different commands
@@ -62,6 +65,7 @@ export class LighterTracker implements DurableObject {
     try {
       await this.connect();
       this.startSnapshotTimer();
+      this.startStatusCheck();
 
       return Response.json({
         success: true,
@@ -115,32 +119,46 @@ export class LighterTracker implements DurableObject {
       this.ws = new WebSocket('wss://mainnet.zklighter.elliot.ai/stream');
 
       // Set up event handlers
-      this.ws.addEventListener('open', () => {
+      this.ws.addEventListener('open', async () => {
         console.log('[LighterTracker] WebSocket connected');
         this.isConnected = true;
         this.reconnectAttempts = 0;
 
-        // Subscribe to each market individually
-        for (const market of markets) {
+        // Subscribe to each market individually with delay to avoid overwhelming the connection
+        console.log(`[LighterTracker] Starting to subscribe to ${markets.length} markets...`);
+
+        for (let i = 0; i < markets.length; i++) {
+          const market = markets[i];
           const subscribeMsg: LighterSubscribeMessage = {
             type: 'subscribe',
             channel: `market_stats/${market.market_index}`,
           };
+
           this.ws?.send(JSON.stringify(subscribeMsg));
+
+          // Add small delay every 10 subscriptions to avoid rate limiting
+          if ((i + 1) % 10 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            console.log(`[LighterTracker] Subscribed to ${i + 1}/${markets.length} markets`);
+          }
         }
 
-        console.log(`[LighterTracker] Subscribed to ${markets.length} markets`);
+        console.log(`[LighterTracker] Completed subscription to ${markets.length} markets`);
 
         // Update tracker status in D1
         this.updateTrackerStatus('connected', null);
       });
 
       this.ws.addEventListener('message', async (event) => {
+        this.messageCount++;
+        if (this.messageCount % 20 === 0) {
+          console.log(`[LighterTracker] Received ${this.messageCount} messages total`);
+        }
         await this.handleMessage(event.data);
       });
 
-      this.ws.addEventListener('close', () => {
-        console.log('[LighterTracker] WebSocket closed');
+      this.ws.addEventListener('close', (event) => {
+        console.log(`[LighterTracker] WebSocket closed - Code: ${event.code}, Reason: ${event.reason}`);
         this.isConnected = false;
         this.scheduleReconnect();
       });
@@ -173,6 +191,11 @@ export class LighterTracker implements DurableObject {
     if (this.snapshotInterval) {
       clearInterval(this.snapshotInterval);
       this.snapshotInterval = null;
+    }
+
+    if (this.statusCheckInterval) {
+      clearInterval(this.statusCheckInterval);
+      this.statusCheckInterval = null;
     }
 
     this.updateTrackerStatus('disconnected', null);
@@ -257,6 +280,21 @@ export class LighterTracker implements DurableObject {
     this.snapshotInterval = setInterval(async () => {
       await this.saveSnapshot();
     }, intervalMs) as any;
+  }
+
+  private startStatusCheck(): void {
+    if (this.statusCheckInterval) {
+      clearInterval(this.statusCheckInterval);
+    }
+
+    // Check status every 30 seconds
+    this.statusCheckInterval = setInterval(() => {
+      console.log(`[LighterTracker] Status Check - Connected: ${this.isConnected}, Buffer: ${this.dataBuffer.size}, Messages: ${this.messageCount}`);
+
+      if (this.ws) {
+        console.log(`[LighterTracker] WebSocket ready state: ${this.ws.readyState} (1=OPEN)`);
+      }
+    }, 30000) as any;
   }
 
   private async saveSnapshot(): Promise<void> {
