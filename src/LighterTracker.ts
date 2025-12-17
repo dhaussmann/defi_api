@@ -1,5 +1,6 @@
 import {
   Env,
+  LighterMarket,
   LighterMarketStats,
   LighterSubscribeMessage,
   LighterWebSocketMessage,
@@ -105,6 +106,11 @@ export class LighterTracker implements DurableObject {
         this.ws = null;
       }
 
+      // Fetch available markets from Lighter API
+      console.log('[LighterTracker] Fetching available markets...');
+      const markets = await this.fetchAvailableMarkets();
+      console.log(`[LighterTracker] Found ${markets.length} markets to track`);
+
       // Create WebSocket connection
       this.ws = new WebSocket('wss://mainnet.zklighter.elliot.ai/stream');
 
@@ -114,13 +120,16 @@ export class LighterTracker implements DurableObject {
         this.isConnected = true;
         this.reconnectAttempts = 0;
 
-        // Subscribe to market stats for all markets
-        const subscribeMsg: LighterSubscribeMessage = {
-          type: 'subscribe',
-          channel: 'market_stats/all',
-        };
+        // Subscribe to each market individually
+        for (const market of markets) {
+          const subscribeMsg: LighterSubscribeMessage = {
+            type: 'subscribe',
+            channel: `market_stats/${market.market_index}`,
+          };
+          this.ws?.send(JSON.stringify(subscribeMsg));
+        }
 
-        this.ws?.send(JSON.stringify(subscribeMsg));
+        console.log(`[LighterTracker] Subscribed to ${markets.length} markets`);
 
         // Update tracker status in D1
         this.updateTrackerStatus('connected', null);
@@ -169,6 +178,27 @@ export class LighterTracker implements DurableObject {
     this.updateTrackerStatus('disconnected', null);
   }
 
+  private async fetchAvailableMarkets(): Promise<LighterMarket[]> {
+    try {
+      const response = await fetch('https://explorer.elliot.ai/api/markets', {
+        headers: {
+          'accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch markets: ${response.status}`);
+      }
+
+      const markets: LighterMarket[] = await response.json();
+      return markets;
+    } catch (error) {
+      console.error('[LighterTracker] Failed to fetch markets:', error);
+      // Return empty array on error - will retry on reconnect
+      return [];
+    }
+  }
+
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
       console.error('[LighterTracker] Max reconnect attempts reached');
@@ -194,32 +224,19 @@ export class LighterTracker implements DurableObject {
     try {
       const message: LighterWebSocketMessage = JSON.parse(data);
 
-      // Log all message types for debugging
-      console.log(`[LighterTracker] Message type: ${message.type}`);
-
       if (message.type === 'subscribed/market_stats' && message.market_stats) {
-        const marketStatsData = message.market_stats;
+        const stats = message.market_stats;
 
-        // Check if this is a single market stats or all markets (object with market_id keys)
-        if (marketStatsData.symbol && marketStatsData.market_id !== undefined) {
-          // Single market stats
-          this.dataBuffer.set(marketStatsData.symbol, marketStatsData);
-          console.log(`[LighterTracker] Received single market update for ${marketStatsData.symbol}, buffer size: ${this.dataBuffer.size}`);
-        } else {
-          // All markets - iterate over the object
-          let processedCount = 0;
-          for (const [marketId, stats] of Object.entries(marketStatsData)) {
-            const marketStats = stats as LighterMarketStats;
+        // Validate that required fields are present
+        if (stats.symbol && stats.market_id !== undefined) {
+          this.dataBuffer.set(stats.symbol, stats);
 
-            // Validate that required fields are present
-            if (marketStats.symbol && marketStats.market_id !== undefined) {
-              this.dataBuffer.set(marketStats.symbol, marketStats);
-              processedCount++;
-            } else {
-              console.warn(`[LighterTracker] Skipping invalid market stats for market_id ${marketId}`);
-            }
+          // Log every 10th update to avoid spam
+          if (this.dataBuffer.size % 10 === 0) {
+            console.log(`[LighterTracker] Buffer size: ${this.dataBuffer.size} markets`);
           }
-          console.log(`[LighterTracker] Received all markets update: ${processedCount} markets, buffer size: ${this.dataBuffer.size}`);
+        } else {
+          console.warn('[LighterTracker] Received invalid market stats:', stats);
         }
 
         // Update last message timestamp

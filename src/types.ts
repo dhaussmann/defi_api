@@ -1,5 +1,10 @@
 // Lighter Exchange WebSocket Message Types
 
+export interface LighterMarket {
+  symbol: string;
+  market_index: number;
+}
+
 export interface LighterMarketStats {
   symbol: string;
   market_id: number;
