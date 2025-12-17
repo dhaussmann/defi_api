@@ -197,7 +197,14 @@ export class LighterTracker implements DurableObject {
       if (message.type === 'subscribed/market_stats' && message.market_stats) {
         // Store in buffer with symbol as key
         const stats = message.market_stats;
-        this.dataBuffer.set(stats.symbol, stats);
+
+        // Validate that required fields are present
+        if (stats.symbol && stats.market_id !== undefined) {
+          this.dataBuffer.set(stats.symbol, stats);
+          console.log(`[LighterTracker] Received stats for ${stats.symbol}`);
+        } else {
+          console.warn('[LighterTracker] Received incomplete market stats:', stats);
+        }
 
         // Update last message timestamp
         await this.updateTrackerStatus('running', null);
@@ -229,29 +236,43 @@ export class LighterTracker implements DurableObject {
       const recordedAt = Date.now();
       const records: MarketStatsRecord[] = [];
 
-      // Convert buffer to records
+      // Convert buffer to records with validation
       for (const [symbol, stats] of this.dataBuffer.entries()) {
+        // Validate required fields
+        if (!stats.symbol || stats.market_id === undefined) {
+          console.warn(`[LighterTracker] Skipping invalid record for ${symbol}`);
+          continue;
+        }
+
+        // Helper function to provide default values for missing data
+        const getValue = (value: any, defaultValue: any) => value !== undefined ? value : defaultValue;
+
         records.push({
           exchange: 'lighter',
           symbol: stats.symbol,
           market_id: stats.market_id,
-          index_price: stats.index_price,
-          mark_price: stats.mark_price,
-          open_interest: stats.open_interest,
-          open_interest_limit: stats.open_interest_limit,
-          funding_clamp_small: stats.funding_clamp_small,
-          funding_clamp_big: stats.funding_clamp_big,
-          last_trade_price: stats.last_trade_price,
-          current_funding_rate: stats.current_funding_rate,
-          funding_rate: stats.funding_rate,
-          funding_timestamp: stats.funding_timestamp,
-          daily_base_token_volume: stats.daily_base_token_volume,
-          daily_quote_token_volume: stats.daily_quote_token_volume,
-          daily_price_low: stats.daily_price_low,
-          daily_price_high: stats.daily_price_high,
-          daily_price_change: stats.daily_price_change,
+          index_price: getValue(stats.index_price, '0'),
+          mark_price: getValue(stats.mark_price, '0'),
+          open_interest: getValue(stats.open_interest, '0'),
+          open_interest_limit: getValue(stats.open_interest_limit, '0'),
+          funding_clamp_small: getValue(stats.funding_clamp_small, '0'),
+          funding_clamp_big: getValue(stats.funding_clamp_big, '0'),
+          last_trade_price: getValue(stats.last_trade_price, '0'),
+          current_funding_rate: getValue(stats.current_funding_rate, '0'),
+          funding_rate: getValue(stats.funding_rate, '0'),
+          funding_timestamp: getValue(stats.funding_timestamp, recordedAt),
+          daily_base_token_volume: getValue(stats.daily_base_token_volume, 0),
+          daily_quote_token_volume: getValue(stats.daily_quote_token_volume, 0),
+          daily_price_low: getValue(stats.daily_price_low, 0),
+          daily_price_high: getValue(stats.daily_price_high, 0),
+          daily_price_change: getValue(stats.daily_price_change, 0),
           recorded_at: recordedAt,
         });
+      }
+
+      if (records.length === 0) {
+        console.log('[LighterTracker] No valid records to save');
+        return;
       }
 
       // Batch insert into D1
@@ -298,8 +319,16 @@ export class LighterTracker implements DurableObject {
       this.dataBuffer.clear();
 
     } catch (error) {
-      console.error('[LighterTracker] Failed to save snapshot:', error);
-      await this.updateTrackerStatus('error', `Snapshot save failed: ${error}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('[LighterTracker] Failed to save snapshot:', errorMessage);
+      console.error('[LighterTracker] Snapshot details - Records count:', records.length);
+
+      // Log first record for debugging
+      if (records.length > 0) {
+        console.error('[LighterTracker] Sample record:', JSON.stringify(records[0]));
+      }
+
+      await this.updateTrackerStatus('error', `Snapshot save failed: ${errorMessage}`);
     }
   }
 
