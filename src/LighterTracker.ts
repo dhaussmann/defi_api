@@ -195,15 +195,28 @@ export class LighterTracker implements DurableObject {
       const message: LighterWebSocketMessage = JSON.parse(data);
 
       if (message.type === 'subscribed/market_stats' && message.market_stats) {
-        // Store in buffer with symbol as key
-        const stats = message.market_stats;
+        const marketStatsData = message.market_stats;
 
-        // Validate that required fields are present
-        if (stats.symbol && stats.market_id !== undefined) {
-          this.dataBuffer.set(stats.symbol, stats);
-          console.log(`[LighterTracker] Received stats for ${stats.symbol}`);
+        // Check if this is a single market stats or all markets (object with market_id keys)
+        if (marketStatsData.symbol && marketStatsData.market_id !== undefined) {
+          // Single market stats
+          this.dataBuffer.set(marketStatsData.symbol, marketStatsData);
+          console.log(`[LighterTracker] Received stats for ${marketStatsData.symbol}`);
         } else {
-          console.warn('[LighterTracker] Received incomplete market stats:', stats);
+          // All markets - iterate over the object
+          let processedCount = 0;
+          for (const [marketId, stats] of Object.entries(marketStatsData)) {
+            const marketStats = stats as LighterMarketStats;
+
+            // Validate that required fields are present
+            if (marketStats.symbol && marketStats.market_id !== undefined) {
+              this.dataBuffer.set(marketStats.symbol, marketStats);
+              processedCount++;
+            } else {
+              console.warn(`[LighterTracker] Skipping invalid market stats for market_id ${marketId}`);
+            }
+          }
+          console.log(`[LighterTracker] Received stats for ${processedCount} markets`);
         }
 
         // Update last message timestamp
