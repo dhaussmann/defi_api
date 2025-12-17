@@ -4,6 +4,8 @@ WebSocket-basierter Tracker für verschiedene Crypto-Börsen, implementiert mit 
 
 ## 🚀 Features
 
+- **Automatischer Start** - Tracker startet automatisch beim ersten Request
+- **Alle Token** - Empfängt Market Stats für alle verfügbaren Token auf Lighter Exchange
 - **WebSocket-Verbindung** zu Lighter Exchange (erweiterbar für weitere Börsen)
 - **Durable Objects** für persistente WebSocket-Verbindungen
 - **15-Sekunden-Snapshots** zur Memory-effizienten Datenverarbeitung
@@ -98,12 +100,23 @@ npx wrangler deploy
 Nach erfolgreichem Deployment erhalten Sie eine URL wie:
 `https://defiapi.your-subdomain.workers.dev`
 
+### 5. Tracker startet automatisch! 🎉
+
+Der Tracker startet **automatisch** beim ersten Request an die API. Sie müssen **keinen** manuellen `/tracker/start` Befehl ausführen!
+
+Rufen Sie einfach die API auf und der Tracker beginnt mit der Datensammlung:
+
+```bash
+# Tracker wird automatisch gestartet beim ersten API-Call
+curl https://defiapi.your-subdomain.workers.dev/api/latest
+```
+
 ## 📡 API Endpoints
 
 ### Tracker Control
 
 #### `POST /tracker/start`
-Startet die WebSocket-Verbindung zum Lighter Exchange.
+Startet die WebSocket-Verbindung zum Lighter Exchange manuell (optional, da automatischer Start aktiv ist).
 
 ```bash
 curl -X POST https://defiapi.your-subdomain.workers.dev/tracker/start
@@ -139,8 +152,8 @@ Response:
   "data": {
     "connected": true,
     "reconnectAttempts": 0,
-    "bufferSize": 1,
-    "bufferedSymbols": ["ETH"]
+    "bufferSize": 3,
+    "bufferedSymbols": ["ETH", "BTC", "SOL"]
   }
 }
 ```
@@ -207,12 +220,14 @@ defi_api/
 
 ## 🔄 Workflow
 
-1. **Start Tracker**: `POST /tracker/start` startet die WebSocket-Verbindung
-2. **Data Collection**: Durable Object empfängt market_stats über WebSocket
-3. **Buffering**: Daten werden im Memory gebuffert (Map mit Symbol als Key)
-4. **Snapshots**: Alle 15 Sekunden werden die Daten in D1 gespeichert
-5. **Memory Cleanup**: Nach dem Speichern wird der Buffer geleert
-6. **API Access**: Daten können über `/api/*` abgerufen werden
+1. **Auto-Start**: Tracker startet automatisch beim ersten API-Request
+2. **WebSocket-Subscription**: Subscription zu `market_stats/all` für alle verfügbaren Token
+3. **Data Collection**: Durable Object empfängt market_stats über WebSocket
+4. **Buffering**: Daten werden im Memory gebuffert (Map mit Symbol als Key)
+5. **Snapshots**: Alle 15 Sekunden werden die Daten in D1 gespeichert
+6. **Memory Cleanup**: Nach dem Speichern wird der Buffer geleert
+7. **API Access**: Daten können über `/api/*` abgerufen werden
+8. **Auto-Reconnect**: Bei Verbindungsabbruch automatisches Wiederverbinden (max. 10 Versuche)
 
 ## 📊 Datenbank-Schema
 

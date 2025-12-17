@@ -21,6 +21,9 @@ export default {
     }
 
     try {
+      // Ensure tracker is started automatically on any request
+      await ensureTrackerStarted(env);
+
       // Route requests
       if (path.startsWith('/tracker/')) {
         return await handleTrackerRoute(request, env, path, corsHeaders);
@@ -43,6 +46,19 @@ export default {
     }
   },
 };
+
+// Ensure tracker is started automatically
+async function ensureTrackerStarted(env: Env): Promise<void> {
+  try {
+    const id = env.LIGHTER_TRACKER.idFromName('lighter-main');
+    const stub = env.LIGHTER_TRACKER.get(id);
+
+    // Call status endpoint to trigger auto-start in Durable Object
+    await stub.fetch('https://internal/status');
+  } catch (error) {
+    console.error('[Worker] Failed to ensure tracker started:', error);
+  }
+}
 
 // Handle tracker control routes
 async function handleTrackerRoute(

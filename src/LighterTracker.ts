@@ -27,6 +27,15 @@ export class LighterTracker implements DurableObject {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // Auto-start tracker if not already running (except for stop command)
+    if (path !== '/stop' && !this.isConnected) {
+      console.log('[LighterTracker] Auto-starting tracker');
+      await this.connect().catch((error) => {
+        console.error('[LighterTracker] Auto-start failed:', error);
+      });
+      this.startSnapshotTimer();
+    }
+
     // Handle different commands
     switch (path) {
       case '/start':
@@ -105,10 +114,10 @@ export class LighterTracker implements DurableObject {
         this.isConnected = true;
         this.reconnectAttempts = 0;
 
-        // Subscribe to market stats for market 0 (ETH)
+        // Subscribe to market stats for all markets
         const subscribeMsg: LighterSubscribeMessage = {
           type: 'subscribe',
-          channel: 'market_stats/0',
+          channel: 'market_stats/all',
         };
 
         this.ws?.send(JSON.stringify(subscribeMsg));
