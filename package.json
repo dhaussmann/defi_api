@@ -1,0 +1,22 @@
+{
+  "name": "defiapi",
+  "version": "1.0.0",
+  "description": "Crypto Exchange Tracker with Cloudflare Workers",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "db:create": "wrangler d1 create defiapi-db",
+    "db:migrations:create": "wrangler d1 migrations create defiapi-db",
+    "db:migrations:apply": "wrangler d1 migrations apply defiapi-db --remote"
+  },
+  "keywords": ["cloudflare", "workers", "crypto", "tracker"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.80.0"
+  }
+}

@@ -1,0 +1,24 @@
+name = "defiapi"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+node_compat = true
+
+# Durable Objects
+[durable_objects]
+bindings = [
+  { name = "LIGHTER_TRACKER", class_name = "LighterTracker" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["LighterTracker"]
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "defiapi-db"
+database_id = "placeholder-will-be-replaced-after-creation"
+
+# Environment Variables (optional)
+[vars]
+SNAPSHOT_INTERVAL_MS = "15000"
