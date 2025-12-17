@@ -17,7 +17,7 @@ new_classes = ["LighterTracker"]
 [[d1_databases]]
 binding = "DB"
 database_name = "defiapi-db"
-database_id = "placeholder-will-be-replaced-after-creation"
+database_id = "77ba166f-0989-45d4-aa63-dc4ff0d517cb"
 
 # Environment Variables (optional)
 [vars]
