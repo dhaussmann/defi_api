@@ -194,6 +194,9 @@ export class LighterTracker implements DurableObject {
     try {
       const message: LighterWebSocketMessage = JSON.parse(data);
 
+      // Log all message types for debugging
+      console.log(`[LighterTracker] Message type: ${message.type}`);
+
       if (message.type === 'subscribed/market_stats' && message.market_stats) {
         const marketStatsData = message.market_stats;
 
@@ -201,7 +204,7 @@ export class LighterTracker implements DurableObject {
         if (marketStatsData.symbol && marketStatsData.market_id !== undefined) {
           // Single market stats
           this.dataBuffer.set(marketStatsData.symbol, marketStatsData);
-          console.log(`[LighterTracker] Received stats for ${marketStatsData.symbol}`);
+          console.log(`[LighterTracker] Received single market update for ${marketStatsData.symbol}, buffer size: ${this.dataBuffer.size}`);
         } else {
           // All markets - iterate over the object
           let processedCount = 0;
@@ -216,7 +219,7 @@ export class LighterTracker implements DurableObject {
               console.warn(`[LighterTracker] Skipping invalid market stats for market_id ${marketId}`);
             }
           }
-          console.log(`[LighterTracker] Received stats for ${processedCount} markets`);
+          console.log(`[LighterTracker] Received all markets update: ${processedCount} markets, buffer size: ${this.dataBuffer.size}`);
         }
 
         // Update last message timestamp
@@ -240,6 +243,8 @@ export class LighterTracker implements DurableObject {
   }
 
   private async saveSnapshot(): Promise<void> {
+    console.log(`[LighterTracker] saveSnapshot called, buffer size: ${this.dataBuffer.size}`);
+
     if (this.dataBuffer.size === 0) {
       console.log('[LighterTracker] No data to save in snapshot');
       return;
@@ -248,6 +253,7 @@ export class LighterTracker implements DurableObject {
     try {
       const recordedAt = Date.now();
       const records: MarketStatsRecord[] = [];
+      console.log('[LighterTracker] Starting to process buffer for snapshot');
 
       // Convert buffer to records with validation
       for (const [symbol, stats] of this.dataBuffer.entries()) {
