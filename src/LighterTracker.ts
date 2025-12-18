@@ -50,6 +50,8 @@ export class LighterTracker implements DurableObject {
         return this.handleStop();
       case '/status':
         return this.handleStatus();
+      case '/debug':
+        return this.handleDebug();
       default:
         return new Response('Not found', { status: 404 });
     }
@@ -102,6 +104,29 @@ export class LighterTracker implements DurableObject {
         bufferedSymbols: Array.from(this.dataBuffer.keys()),
       },
     });
+  }
+
+  private async handleDebug(): Promise<Response> {
+    try {
+      const markets = await this.fetchAvailableMarkets();
+
+      return Response.json({
+        success: true,
+        debug: {
+          connected: this.isConnected,
+          messageCount: this.messageCount,
+          bufferSize: this.dataBuffer.size,
+          wsReadyState: this.ws?.readyState,
+          marketsCount: markets.length,
+          sampleMarkets: markets.slice(0, 5),
+        },
+      });
+    } catch (error) {
+      return Response.json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Debug failed',
+      }, { status: 500 });
+    }
   }
 
   private async connect(): Promise<void> {
