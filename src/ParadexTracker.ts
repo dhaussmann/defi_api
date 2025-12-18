@@ -342,9 +342,17 @@ export class ParadexTracker implements DurableObject {
       const data = await response.json();
       const allMarkets: ParadexMarket[] = data.results || data;
 
-      // Nur PERP-Märkte filtern
-      const perpMarkets = allMarkets.filter(market => market.asset_kind === 'PERP');
-      console.log(`[ParadexTracker] Fetched ${allMarkets.length} markets from API, filtered to ${perpMarkets.length} PERP markets`);
+      // Nur EXAKT "PERP"-Märkte filtern (nicht PERP_OPTION, etc.)
+      const perpMarkets = allMarkets.filter(market => {
+        // Strikter Vergleich: asset_kind muss EXAKT "PERP" sein
+        const assetKind = (market.asset_kind || '').trim();
+        return assetKind === 'PERP';
+      });
+
+      // Debug-Logging: Zeige welche asset_kinds gefunden wurden
+      const assetKinds = new Set(allMarkets.map(m => m.asset_kind));
+      console.log(`[ParadexTracker] Found asset_kinds: ${Array.from(assetKinds).join(', ')}`);
+      console.log(`[ParadexTracker] Fetched ${allMarkets.length} markets from API, filtered to ${perpMarkets.length} PERP markets (excluded: ${allMarkets.length - perpMarkets.length})`);
 
       // Cache aktualisieren
       this.cachedMarkets = perpMarkets;
@@ -429,8 +437,12 @@ export class ParadexTracker implements DurableObject {
 
         // Validierung: Pflichtfelder müssen vorhanden sein
         if (data.symbol) {
-          // NUR PERP-Märkte speichern: Prüfen ob Symbol in unserer gefilterten Liste ist
-          const isPerpMarket = this.cachedMarkets.some(market => market.symbol === data.symbol);
+          // NUR PERP-Märkte speichern: Doppelte Prüfung mit striktem Filter
+          // 1. Prüfen ob Symbol in unserer gefilterten Liste ist
+          const matchedMarket = this.cachedMarkets.find(market => market.symbol === data.symbol);
+
+          // 2. Zusätzliche Sicherheit: Nochmal asset_kind prüfen (nur bei Match)
+          const isPerpMarket = matchedMarket && matchedMarket.asset_kind === 'PERP';
 
           if (isPerpMarket) {
             // In Buffer speichern - überschreibt alte Werte für selbes Symbol
@@ -443,7 +455,8 @@ export class ParadexTracker implements DurableObject {
           } else {
             // Symbol ist kein PERP-Markt, überspringen
             if (this.messageCount % 100 === 0) {
-              console.log(`[ParadexTracker] Skipping non-PERP market: ${data.symbol}`);
+              const reason = !matchedMarket ? 'not in cached markets' : `asset_kind is ${matchedMarket.asset_kind}`;
+              console.log(`[ParadexTracker] Skipping non-PERP market: ${data.symbol} (${reason})`);
             }
           }
         } else {
