@@ -237,6 +237,7 @@ export class LighterTracker implements DurableObject {
   }
 
   private async fetchAvailableMarkets(): Promise<LighterMarket[]> {
+    // Try to fetch from API first
     try {
       const response = await fetch('https://explorer.elliot.ai/api/markets', {
         headers: {
@@ -244,17 +245,133 @@ export class LighterTracker implements DurableObject {
         },
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to fetch markets: ${response.status}`);
+      if (response.ok) {
+        const markets: LighterMarket[] = await response.json();
+        console.log(`[LighterTracker] Fetched ${markets.length} markets from API`);
+        return markets;
       }
-
-      const markets: LighterMarket[] = await response.json();
-      return markets;
     } catch (error) {
-      console.error('[LighterTracker] Failed to fetch markets:', error);
-      // Return empty array on error - will retry on reconnect
-      return [];
+      console.warn('[LighterTracker] API fetch failed, using hardcoded markets');
     }
+
+    // Fallback to hardcoded market list
+    // This list should be updated periodically when new markets are added
+    return this.getHardcodedMarkets();
+  }
+
+  private getHardcodedMarkets(): LighterMarket[] {
+    // Hardcoded markets list - last updated: 2025-12-18
+    // To update: curl https://explorer.elliot.ai/api/markets
+    return [
+      { symbol: 'ETH', market_index: 0 },
+      { symbol: 'BTC', market_index: 1 },
+      { symbol: 'SOL', market_index: 2 },
+      { symbol: 'DOGE', market_index: 3 },
+      { symbol: '1000PEPE', market_index: 4 },
+      { symbol: 'WIF', market_index: 5 },
+      { symbol: 'SUI', market_index: 6 },
+      { symbol: 'LINK', market_index: 7 },
+      { symbol: 'ONDO', market_index: 8 },
+      { symbol: 'AVAX', market_index: 9 },
+      { symbol: 'VIRTUAL', market_index: 10 },
+      { symbol: 'DOT', market_index: 11 },
+      { symbol: 'TRUMP', market_index: 12 },
+      { symbol: 'OM', market_index: 13 },
+      { symbol: 'PNUT', market_index: 14 },
+      { symbol: 'NEAR', market_index: 15 },
+      { symbol: 'PENGU', market_index: 16 },
+      { symbol: '1000SHIB', market_index: 17 },
+      { symbol: '1000BONK', market_index: 18 },
+      { symbol: '1000FLOKI', market_index: 19 },
+      { symbol: 'BERA', market_index: 20 },
+      { symbol: 'FARTCOIN', market_index: 21 },
+      { symbol: 'AI16Z', market_index: 22 },
+      { symbol: 'MOVE', market_index: 23 },
+      { symbol: 'HYPE', market_index: 24 },
+      { symbol: 'BNB', market_index: 25 },
+      { symbol: 'JUP', market_index: 26 },
+      { symbol: 'AAVE', market_index: 27 },
+      { symbol: 'XRP', market_index: 28 },
+      { symbol: 'ENA', market_index: 29 },
+      { symbol: 'UNI', market_index: 30 },
+      { symbol: 'APT', market_index: 31 },
+      { symbol: 'LTC', market_index: 32 },
+      { symbol: 'USDC', market_index: 33 },
+      { symbol: 'IP', market_index: 34 },
+      { symbol: 'POL', market_index: 35 },
+      { symbol: 'CRV', market_index: 36 },
+      { symbol: 'RENDER', market_index: 37 },
+      { symbol: 'TIA', market_index: 38 },
+      { symbol: 'ADA', market_index: 39 },
+      { symbol: 'OP', market_index: 40 },
+      { symbol: 'MKR', market_index: 41 },
+      { symbol: 'SUSHI', market_index: 42 },
+      { symbol: 'TAO', market_index: 43 },
+      { symbol: 'STX', market_index: 44 },
+      { symbol: 'USDT', market_index: 45 },
+      { symbol: 'USDE', market_index: 46 },
+      { symbol: 'USDY', market_index: 47 },
+      { symbol: 'PYUSD', market_index: 48 },
+      { symbol: 'EIGEN', market_index: 49 },
+      { symbol: 'ARB', market_index: 50 },
+      { symbol: 'MOODENG', market_index: 51 },
+      { symbol: 'GRASS', market_index: 52 },
+      { symbol: 'ME', market_index: 53 },
+      { symbol: 'RAY', market_index: 54 },
+      { symbol: 'ORDI', market_index: 55 },
+      { symbol: 'SEI', market_index: 56 },
+      { symbol: 'WLD', market_index: 57 },
+      { symbol: 'BCH', market_index: 58 },
+      { symbol: 'HBAR', market_index: 59 },
+      { symbol: 'FTM', market_index: 60 },
+      { symbol: 'GMX', market_index: 61 },
+      { symbol: 'DYDX', market_index: 62 },
+      { symbol: 'INJ', market_index: 63 },
+      { symbol: 'ETHFI', market_index: 64 },
+      { symbol: 'AERO', market_index: 65 },
+      { symbol: 'TOSHI', market_index: 66 },
+      { symbol: 'POPCAT', market_index: 67 },
+      { symbol: 'MELANIA', market_index: 68 },
+      { symbol: 'MSTR', market_index: 69 },
+      { symbol: 'TSLA', market_index: 70 },
+      { symbol: 'NVDA', market_index: 71 },
+      { symbol: 'NFLX', market_index: 72 },
+      { symbol: 'CRO', market_index: 73 },
+      { symbol: 'MOTHER', market_index: 74 },
+      { symbol: 'DOLO', market_index: 75 },
+      { symbol: 'XLM', market_index: 76 },
+      { symbol: 'LAYER', market_index: 77 },
+      { symbol: 'KHEOWZOO', market_index: 78 },
+      { symbol: 'GOAT', market_index: 79 },
+      { symbol: 'RIFAMPICIN', market_index: 80 },
+      { symbol: 'ASTER', market_index: 83 },
+      { symbol: '0G', market_index: 84 },
+      { symbol: 'SWELL', market_index: 85 },
+      { symbol: 'APEX', market_index: 86 },
+      { symbol: 'FF', market_index: 87 },
+      { symbol: '2Z', market_index: 88 },
+      { symbol: 'EDEN', market_index: 89 },
+      { symbol: 'MW', market_index: 90 },
+      { symbol: 'PEAQ', market_index: 91 },
+      { symbol: 'EURUSD', market_index: 96 },
+      { symbol: 'GBPUSD', market_index: 97 },
+      { symbol: 'USDJPY', market_index: 98 },
+      { symbol: 'USDCHF', market_index: 99 },
+      { symbol: 'USDCAD', market_index: 100 },
+      { symbol: 'CC', market_index: 101 },
+      { symbol: 'ICP', market_index: 102 },
+      { symbol: 'FIL', market_index: 103 },
+      { symbol: 'NZDUSD', market_index: 104 },
+      { symbol: 'AUDUSD', market_index: 106 },
+      { symbol: 'HOOD', market_index: 108 },
+      { symbol: 'COIN', market_index: 109 },
+      { symbol: 'AAPL', market_index: 113 },
+      { symbol: 'AMZN', market_index: 114 },
+      { symbol: 'GOOGL', market_index: 116 },
+      { symbol: 'RKLB', market_index: 117 },
+      { symbol: 'META', market_index: 118 },
+      { symbol: 'PLTR', market_index: 119 }
+    ];
   }
 
   private scheduleReconnect(): void {
