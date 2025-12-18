@@ -26,7 +26,7 @@ export interface LighterMarketStats {
 }
 
 export interface LighterWebSocketMessage {
-  type: 'subscribed/market_stats' | 'error' | 'ping' | 'pong';
+  type: 'subscribed/market_stats' | 'update/market_stats' | 'error' | 'ping' | 'pong';
   channel?: string;
   market_stats?: LighterMarketStats;
   error?: string;

@@ -533,9 +533,11 @@ export class LighterTracker implements DurableObject {
       return;
     }
 
+    // Variable außerhalb des try-Blocks deklarieren, damit sie im catch-Block verfügbar ist
+    let records: MarketStatsRecord[] = [];
+
     try {
       const recordedAt = Date.now();
-      const records: MarketStatsRecord[] = [];
       console.log('[LighterTracker] Starting to process buffer for snapshot');
 
       // Buffer zu Records konvertieren mit Validierung
