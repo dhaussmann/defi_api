@@ -429,12 +429,22 @@ export class ParadexTracker implements DurableObject {
 
         // Validierung: Pflichtfelder müssen vorhanden sein
         if (data.symbol) {
-          // In Buffer speichern - überschreibt alte Werte für selbes Symbol
-          this.dataBuffer.set(data.symbol, data);
+          // NUR PERP-Märkte speichern: Prüfen ob Symbol in unserer gefilterten Liste ist
+          const isPerpMarket = this.cachedMarkets.some(market => market.symbol === data.symbol);
 
-          // Logging alle 50 Updates um Spam zu vermeiden
-          if (this.messageCount % 50 === 0) {
-            console.log(`[ParadexTracker] Buffer size: ${this.dataBuffer.size} markets`);
+          if (isPerpMarket) {
+            // In Buffer speichern - überschreibt alte Werte für selbes Symbol
+            this.dataBuffer.set(data.symbol, data);
+
+            // Logging alle 50 Updates um Spam zu vermeiden
+            if (this.messageCount % 50 === 0) {
+              console.log(`[ParadexTracker] Buffer size: ${this.dataBuffer.size} PERP markets`);
+            }
+          } else {
+            // Symbol ist kein PERP-Markt, überspringen
+            if (this.messageCount % 100 === 0) {
+              console.log(`[ParadexTracker] Skipping non-PERP market: ${data.symbol}`);
+            }
           }
         } else {
           console.warn('[ParadexTracker] Received invalid market data:', data);
