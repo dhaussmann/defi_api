@@ -73,10 +73,97 @@ export interface TrackerStatusRecord {
   updated_at?: number;
 }
 
+// Paradex Exchange Types
+
+export interface ParadexMarket {
+  symbol: string;
+  base_currency: string;
+  quote_currency: string;
+  settlement_currency: string;
+  order_size_increment: string;
+  price_tick_size: string;
+  min_notional: string;
+  open_at: number;
+  expiry_at: number;
+  asset_kind: string;
+  market_kind: string;
+  position_limit: string;
+  price_bands_width: string;
+  max_slippage: string;
+  max_open_orders: number;
+  max_funding_rate: string;
+  price_feed_id: string;
+  oracle_ewma_factor: string;
+  max_order_size: string;
+  max_funding_rate_change: string;
+  max_tob_spread: string;
+  interest_rate: string;
+  clamp_rate: string;
+  funding_period_hours: number;
+  funding_multiplier: number;
+  tags?: string[];
+}
+
+export interface ParadexGreeks {
+  delta: string;
+  gamma: string;
+  vega: string;
+  rho: string;
+  vanna: string;
+  volga: string;
+}
+
+export interface ParadexMarketData {
+  symbol: string;
+  mark_price: string;
+  mark_iv?: string;
+  delta?: string;
+  greeks?: ParadexGreeks;
+  last_traded_price: string;
+  bid: string;
+  bid_iv?: string;
+  ask: string;
+  ask_iv?: string;
+  last_iv?: string;
+  volume_24h: string;
+  total_volume: string;
+  created_at: number;
+  underlying_price?: string;
+  open_interest: string;
+  funding_rate: string;
+  price_change_rate_24h: string;
+  future_funding_rate?: string;
+}
+
+export interface ParadexWebSocketMessage {
+  jsonrpc: string;
+  method: string;
+  params?: {
+    channel: string;
+    data?: ParadexMarketData;
+  };
+  id?: number;
+  result?: any;
+  error?: {
+    code: number;
+    message: string;
+  };
+}
+
+export interface ParadexSubscribeMessage {
+  jsonrpc: string;
+  method: string;
+  params: {
+    channel: string;
+  };
+  id: number;
+}
+
 // Cloudflare Workers Environment Bindings
 
 export interface Env {
   LIGHTER_TRACKER: DurableObjectNamespace;
+  PARADEX_TRACKER: DurableObjectNamespace;
   DB: D1Database;
   SNAPSHOT_INTERVAL_MS?: string;
 }

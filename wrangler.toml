@@ -1,17 +1,22 @@
 name = "defiapi"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
-node_compat = true
+compatibility_flags = ["nodejs_compat"]
 
 # Durable Objects
 [durable_objects]
 bindings = [
-  { name = "LIGHTER_TRACKER", class_name = "LighterTracker" }
+  { name = "LIGHTER_TRACKER", class_name = "LighterTracker" },
+  { name = "PARADEX_TRACKER", class_name = "ParadexTracker" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_classes = ["LighterTracker"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["ParadexTracker"]
 
 # D1 Database
 [[d1_databases]]
