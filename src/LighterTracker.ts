@@ -315,10 +315,16 @@ export class LighterTracker implements DurableObject {
     this.reconnectAttempts++;
     console.log(`[LighterTracker] Scheduling reconnect attempt ${this.reconnectAttempts}`);
 
-    this.reconnectTimeout = setTimeout(() => {
-      this.connect().catch((error) => {
+    this.reconnectTimeout = setTimeout(async () => {
+      try {
+        await this.connect();
+        // Restart timers after successful reconnect
+        this.startSnapshotTimer();
+        this.startStatusCheck();
+        console.log('[LighterTracker] Reconnect successful, timers restarted');
+      } catch (error) {
         console.error('[LighterTracker] Reconnect failed:', error);
-      });
+      }
     }, this.RECONNECT_DELAY) as any;
   }
 
