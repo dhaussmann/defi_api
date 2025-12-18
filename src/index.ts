@@ -1,7 +1,8 @@
 import { LighterTracker } from './LighterTracker';
+import { ParadexTracker } from './ParadexTracker';
 import { Env, ApiResponse, MarketStatsQuery, MarketStatsRecord } from './types';
 
-export { LighterTracker };
+export { LighterTracker, ParadexTracker };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -21,8 +22,8 @@ export default {
     }
 
     try {
-      // Ensure tracker is started automatically on any request
-      await ensureTrackerStarted(env);
+      // Ensure trackers are started automatically on any request
+      await ensureTrackersStarted(env);
 
       // Route requests
       if (path.startsWith('/tracker/')) {
@@ -47,16 +48,20 @@ export default {
   },
 };
 
-// Ensure tracker is started automatically
-async function ensureTrackerStarted(env: Env): Promise<void> {
+// Ensure all trackers are started automatically
+async function ensureTrackersStarted(env: Env): Promise<void> {
   try {
-    const id = env.LIGHTER_TRACKER.idFromName('lighter-main');
-    const stub = env.LIGHTER_TRACKER.get(id);
+    // Start Lighter Tracker
+    const lighterId = env.LIGHTER_TRACKER.idFromName('lighter-main');
+    const lighterStub = env.LIGHTER_TRACKER.get(lighterId);
+    await lighterStub.fetch('https://internal/status');
 
-    // Call status endpoint to trigger auto-start in Durable Object
-    await stub.fetch('https://internal/status');
+    // Start Paradex Tracker
+    const paradexId = env.PARADEX_TRACKER.idFromName('paradex-main');
+    const paradexStub = env.PARADEX_TRACKER.get(paradexId);
+    await paradexStub.fetch('https://internal/status');
   } catch (error) {
-    console.error('[Worker] Failed to ensure tracker started:', error);
+    console.error('[Worker] Failed to ensure trackers started:', error);
   }
 }
 
@@ -67,12 +72,30 @@ async function handleTrackerRoute(
   path: string,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
-  // Get Durable Object instance
-  const id = env.LIGHTER_TRACKER.idFromName('lighter-main');
-  const stub = env.LIGHTER_TRACKER.get(id);
+  let exchange: string;
+  let doPath: string;
+  let stub: DurableObjectStub;
+
+  // Determine which exchange tracker to use
+  if (path.startsWith('/tracker/lighter/')) {
+    exchange = 'lighter';
+    doPath = path.replace('/tracker/lighter', '');
+    const id = env.LIGHTER_TRACKER.idFromName('lighter-main');
+    stub = env.LIGHTER_TRACKER.get(id);
+  } else if (path.startsWith('/tracker/paradex/')) {
+    exchange = 'paradex';
+    doPath = path.replace('/tracker/paradex', '');
+    const id = env.PARADEX_TRACKER.idFromName('paradex-main');
+    stub = env.PARADEX_TRACKER.get(id);
+  } else {
+    // Backward compatibility: /tracker/* routes to lighter
+    exchange = 'lighter';
+    doPath = path.replace('/tracker', '');
+    const id = env.LIGHTER_TRACKER.idFromName('lighter-main');
+    stub = env.LIGHTER_TRACKER.get(id);
+  }
 
   // Forward request to Durable Object
-  const doPath = path.replace('/tracker', '');
   const doUrl = new URL(request.url);
   doUrl.pathname = doPath;
 
@@ -268,19 +291,35 @@ function handleRoot(corsHeaders: Record<string, string>): Response {
 <body>
   <h1>🚀 DeFi API - Crypto Exchange Tracker</h1>
   <p>WebSocket-basierter Tracker für Crypto-Börsen mit Cloudflare Workers & Durable Objects</p>
+  <p><strong>Unterstützte Börsen:</strong> Lighter, Paradex</p>
 
   <h2>📊 Tracker Control</h2>
+  <h3>Lighter Exchange</h3>
   <div class="endpoint">
-    <span class="method post">POST</span><code>/tracker/start</code>
+    <span class="method post">POST</span><code>/tracker/lighter/start</code>
     <p>Startet die WebSocket-Verbindung zum Lighter Exchange</p>
   </div>
   <div class="endpoint">
-    <span class="method post">POST</span><code>/tracker/stop</code>
-    <p>Stoppt die WebSocket-Verbindung</p>
+    <span class="method post">POST</span><code>/tracker/lighter/stop</code>
+    <p>Stoppt die WebSocket-Verbindung zu Lighter</p>
   </div>
   <div class="endpoint">
-    <span class="method get">GET</span><code>/tracker/status</code>
-    <p>Zeigt den aktuellen Status der WebSocket-Verbindung</p>
+    <span class="method get">GET</span><code>/tracker/lighter/status</code>
+    <p>Zeigt den aktuellen Status der Lighter WebSocket-Verbindung</p>
+  </div>
+
+  <h3>Paradex Exchange</h3>
+  <div class="endpoint">
+    <span class="method post">POST</span><code>/tracker/paradex/start</code>
+    <p>Startet die WebSocket-Verbindung zum Paradex Exchange</p>
+  </div>
+  <div class="endpoint">
+    <span class="method post">POST</span><code>/tracker/paradex/stop</code>
+    <p>Stoppt die WebSocket-Verbindung zu Paradex</p>
+  </div>
+  <div class="endpoint">
+    <span class="method get">GET</span><code>/tracker/paradex/status</code>
+    <p>Zeigt den aktuellen Status der Paradex WebSocket-Verbindung</p>
   </div>
 
   <h2>📈 API Endpoints</h2>
@@ -312,17 +351,23 @@ function handleRoot(corsHeaders: Record<string, string>): Response {
 
   <h2>💡 Beispiele</h2>
   <pre>
-# Tracker starten
-curl -X POST https://your-worker.workers.dev/tracker/start
+# Lighter Tracker starten
+curl -X POST https://your-worker.workers.dev/tracker/lighter/start
 
-# Neueste Stats abrufen
-curl https://your-worker.workers.dev/api/latest
+# Paradex Tracker starten
+curl -X POST https://your-worker.workers.dev/tracker/paradex/start
 
-# Stats für ETH abrufen
-curl https://your-worker.workers.dev/api/stats?symbol=ETH&limit=50
+# Neueste Stats von Lighter abrufen
+curl https://your-worker.workers.dev/api/latest?exchange=lighter
+
+# Neueste Stats von Paradex abrufen
+curl https://your-worker.workers.dev/api/latest?exchange=paradex
+
+# Stats für bestimmtes Symbol abrufen
+curl https://your-worker.workers.dev/api/stats?exchange=paradex&symbol=BTC-USD-PERP&limit=50
 
 # Stats in Zeitraum abrufen
-curl "https://your-worker.workers.dev/api/stats?from=1700000000000&to=1700100000000"
+curl "https://your-worker.workers.dev/api/stats?exchange=lighter&from=1700000000000&to=1700100000000"
   </pre>
 
   <h2>🔧 Architektur</h2>
