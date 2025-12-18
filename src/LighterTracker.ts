@@ -15,13 +15,17 @@ export class LighterTracker implements DurableObject {
   private snapshotInterval: number | null = null;
   private statusCheckInterval: number | null = null;
   private pingInterval: number | null = null;
+  private marketsFetchInterval: number | null = null;
   private dataBuffer: Map<string, LighterMarketStats> = new Map();
+  private cachedMarkets: LighterMarket[] = [];
+  private lastMarketsFetch: number = 0;
   private isConnected = false;
   private reconnectAttempts = 0;
   private messageCount = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 10;
   private readonly RECONNECT_DELAY = 5000;
   private readonly PING_INTERVAL = 30000; // 30 seconds
+  private readonly MARKETS_REFRESH_INTERVAL = 3600000; // 60 minutes
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -159,7 +163,7 @@ export class LighterTracker implements DurableObject {
         this.isConnected = true;
         this.reconnectAttempts = 0;
 
-        // Subscribe to each market individually
+        // Subscribe to each market individually with delay to avoid rate limiting
         console.log(`[LighterTracker] Starting to subscribe to ${markets.length} markets...`);
 
         for (let i = 0; i < markets.length; i++) {
@@ -171,9 +175,13 @@ export class LighterTracker implements DurableObject {
 
           this.ws?.send(JSON.stringify(subscribeMsg));
 
-          // Add small delay every 10 subscriptions to avoid overwhelming
-          if ((i + 1) % 10 === 0) {
-            await new Promise(resolve => setTimeout(resolve, 100));
+          // Add delay between each subscription to avoid overwhelming the server
+          if (i < markets.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 50)); // 50ms between each subscription
+          }
+
+          // Log progress every 20 subscriptions
+          if ((i + 1) % 20 === 0) {
             console.log(`[LighterTracker] Subscribed to ${i + 1}/${markets.length} markets`);
           }
         }
@@ -241,12 +249,26 @@ export class LighterTracker implements DurableObject {
       this.pingInterval = null;
     }
 
+    if (this.marketsFetchInterval) {
+      clearInterval(this.marketsFetchInterval);
+      this.marketsFetchInterval = null;
+    }
+
     this.updateTrackerStatus('disconnected', null);
   }
 
   private async fetchAvailableMarkets(): Promise<LighterMarket[]> {
+    const now = Date.now();
+
+    // Return cached markets if available and not expired
+    if (this.cachedMarkets.length > 0 && (now - this.lastMarketsFetch) < this.MARKETS_REFRESH_INTERVAL) {
+      console.log(`[LighterTracker] Using cached markets (${this.cachedMarkets.length} markets, cached ${Math.round((now - this.lastMarketsFetch) / 60000)} minutes ago)`);
+      return this.cachedMarkets;
+    }
+
     try {
-      // Use proper headers to avoid 403 blocking
+      // Fetch fresh markets from API
+      console.log('[LighterTracker] Fetching fresh markets from API...');
       const response = await fetch('https://explorer.elliot.ai/api/markets', {
         headers: {
           'accept': 'application/json',
@@ -260,9 +282,21 @@ export class LighterTracker implements DurableObject {
 
       const markets: LighterMarket[] = await response.json();
       console.log(`[LighterTracker] Fetched ${markets.length} markets from API`);
+
+      // Update cache
+      this.cachedMarkets = markets;
+      this.lastMarketsFetch = now;
+
       return markets;
     } catch (error) {
       console.error('[LighterTracker] Failed to fetch markets:', error);
+
+      // Return cached markets if available, even if expired
+      if (this.cachedMarkets.length > 0) {
+        console.log(`[LighterTracker] Using expired cache as fallback (${this.cachedMarkets.length} markets)`);
+        return this.cachedMarkets;
+      }
+
       throw error;
     }
   }
@@ -292,7 +326,16 @@ export class LighterTracker implements DurableObject {
     try {
       const message: LighterWebSocketMessage = JSON.parse(data);
 
-      // Handle pong responses
+      // Handle ping from server - respond with pong
+      if (message.type === 'ping') {
+        console.log('[LighterTracker] Received ping from server, sending pong');
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: 'pong' }));
+        }
+        return;
+      }
+
+      // Handle pong responses to our pings
       if (message.type === 'pong') {
         console.log('[LighterTracker] Received pong');
         return;
