@@ -263,15 +263,17 @@ export class LighterTracker implements DurableObject {
         return;
       }
 
-      if (message.type === 'subscribed/market_stats' && message.market_stats) {
+      // Handle both initial subscription and ongoing updates
+      if ((message.type === 'subscribed/market_stats' || message.type === 'update/market_stats')
+          && message.market_stats) {
         const stats = message.market_stats;
 
         // Validate that required fields are present
         if (stats.symbol && stats.market_id !== undefined) {
           this.dataBuffer.set(stats.symbol, stats);
 
-          // Log every 10th update to avoid spam
-          if (this.dataBuffer.size % 10 === 0) {
+          // Log every 50th update to avoid spam
+          if (this.messageCount % 50 === 0) {
             console.log(`[LighterTracker] Buffer size: ${this.dataBuffer.size} markets`);
           }
         } else {
