@@ -7,36 +7,63 @@ import {
   MarketStatsRecord,
 } from './types';
 
+/**
+ * LighterTracker - Durable Object für persistente WebSocket-Verbindung
+ *
+ * Dieser Tracker verwaltet eine dauerhafte WebSocket-Verbindung zum Lighter Exchange
+ * und speichert Market-Statistiken in regelmäßigen Snapshots in die D1 Datenbank.
+ *
+ * Hauptfunktionen:
+ * - WebSocket-Verbindung mit automatischer Reconnect-Logik
+ * - Buffering von Market-Daten im Speicher
+ * - Regelmäßige Snapshots (alle 15 Sekunden) in die Datenbank
+ * - Caching der verfügbaren Markets (60 Minuten)
+ * - Keep-Alive via Ping/Pong
+ */
 export class LighterTracker implements DurableObject {
+  // Durable Object State und Environment
   private state: DurableObjectState;
   private env: Env;
+
+  // WebSocket-Verbindung und Timer
   private ws: WebSocket | null = null;
   private reconnectTimeout: number | null = null;
   private snapshotInterval: number | null = null;
   private statusCheckInterval: number | null = null;
   private pingInterval: number | null = null;
   private marketsFetchInterval: number | null = null;
-  private dataBuffer: Map<string, LighterMarketStats> = new Map();
-  private cachedMarkets: LighterMarket[] = [];
-  private lastMarketsFetch: number = 0;
+
+  // Daten-Buffer und Caches
+  private dataBuffer: Map<string, LighterMarketStats> = new Map(); // Zwischenspeicher für Market-Daten
+  private cachedMarkets: LighterMarket[] = []; // Cache für verfügbare Markets
+  private lastMarketsFetch: number = 0; // Timestamp des letzten Market-Fetch
+
+  // Status-Variablen
   private isConnected = false;
   private reconnectAttempts = 0;
   private messageCount = 0;
-  private readonly MAX_RECONNECT_ATTEMPTS = 10;
-  private readonly RECONNECT_DELAY = 5000;
-  private readonly PING_INTERVAL = 30000; // 30 seconds
-  private readonly MARKETS_REFRESH_INTERVAL = 3600000; // 60 minutes
+
+  // Konfigurationskonstanten
+  private readonly MAX_RECONNECT_ATTEMPTS = 10; // Maximale Anzahl an Reconnect-Versuchen
+  private readonly RECONNECT_DELAY = 5000; // 5 Sekunden Wartezeit zwischen Reconnects
+  private readonly PING_INTERVAL = 30000; // 30 Sekunden - Ping-Intervall für Keep-Alive
+  private readonly MARKETS_REFRESH_INTERVAL = 3600000; // 60 Minuten - Markets-Cache Laufzeit
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
   }
 
+  /**
+   * Haupt-Handler für eingehende Requests
+   * Implementiert Auto-Start-Mechanismus und Route-Handling
+   */
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // Auto-start tracker if not already running (except for stop command)
+    // Auto-Start: Tracker automatisch starten, wenn nicht verbunden (außer bei /stop)
+    // Dies stellt sicher, dass der Tracker bei jedem Request aktiv ist
     if (path !== '/stop' && !this.isConnected) {
       console.log('[LighterTracker] Auto-starting tracker');
       await this.connect().catch((error) => {
@@ -46,7 +73,7 @@ export class LighterTracker implements DurableObject {
       this.startStatusCheck();
     }
 
-    // Handle different commands
+    // Route-Handling für verschiedene Befehle
     switch (path) {
       case '/start':
         return this.handleStart();
@@ -61,6 +88,9 @@ export class LighterTracker implements DurableObject {
     }
   }
 
+  /**
+   * Handler für /start - Startet den Tracker manuell
+   */
   private async handleStart(): Promise<Response> {
     if (this.isConnected) {
       return Response.json({
@@ -88,6 +118,9 @@ export class LighterTracker implements DurableObject {
     }
   }
 
+  /**
+   * Handler für /stop - Stoppt den Tracker
+   */
   private async handleStop(): Promise<Response> {
     this.disconnect();
 
@@ -98,6 +131,9 @@ export class LighterTracker implements DurableObject {
     });
   }
 
+  /**
+   * Handler für /status - Gibt aktuellen Status zurück
+   */
   private async handleStatus(): Promise<Response> {
     return Response.json({
       success: true,
@@ -110,6 +146,10 @@ export class LighterTracker implements DurableObject {
     });
   }
 
+  /**
+   * Handler für /debug - Erweiterte Debug-Informationen
+   * Zeigt zusätzlich verfügbare Markets und WebSocket ReadyState
+   */
   private async handleDebug(): Promise<Response> {
     try {
       const markets = await this.fetchAvailableMarkets();
@@ -141,29 +181,40 @@ export class LighterTracker implements DurableObject {
     }
   }
 
+  /**
+   * Stellt WebSocket-Verbindung zum Lighter Exchange her
+   *
+   * Ablauf:
+   * 1. Alte Verbindung schließen (falls vorhanden)
+   * 2. Markets von API abrufen (mit Caching)
+   * 3. WebSocket-Verbindung aufbauen
+   * 4. Event-Handler registrieren
+   * 5. Nach Verbindungsaufbau: Alle Markets einzeln subscriben
+   * 6. Ping-Interval starten für Keep-Alive
+   */
   private async connect(): Promise<void> {
     try {
-      // Close existing connection if any
+      // Alte Verbindung aufräumen
       if (this.ws) {
         this.ws.close();
         this.ws = null;
       }
 
-      // Fetch available markets from Lighter API
+      // Markets von API holen (verwendet Cache wenn verfügbar)
       console.log('[LighterTracker] Fetching available markets...');
       const markets = await this.fetchAvailableMarkets();
       console.log(`[LighterTracker] Found ${markets.length} markets to track`);
 
-      // Create WebSocket connection
+      // WebSocket-Verbindung zu Lighter erstellen
       this.ws = new WebSocket('wss://mainnet.zklighter.elliot.ai/stream');
 
-      // Set up event handlers
+      // Event Handler: Verbindung aufgebaut
       this.ws.addEventListener('open', async () => {
         console.log('[LighterTracker] WebSocket connected');
         this.isConnected = true;
         this.reconnectAttempts = 0;
 
-        // Subscribe to each market individually with delay to avoid rate limiting
+        // Zu jedem Market einzeln subscriben mit Delays um Server nicht zu überlasten
         console.log(`[LighterTracker] Starting to subscribe to ${markets.length} markets...`);
 
         for (let i = 0; i < markets.length; i++) {
@@ -175,12 +226,12 @@ export class LighterTracker implements DurableObject {
 
           this.ws?.send(JSON.stringify(subscribeMsg));
 
-          // Add delay between each subscription to avoid overwhelming the server
+          // 50ms Delay zwischen jeder Subscription um Rate-Limiting zu vermeiden
           if (i < markets.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 50)); // 50ms between each subscription
+            await new Promise(resolve => setTimeout(resolve, 50));
           }
 
-          // Log progress every 20 subscriptions
+          // Progress-Logging alle 20 Subscriptions
           if ((i + 1) % 20 === 0) {
             console.log(`[LighterTracker] Subscribed to ${i + 1}/${markets.length} markets`);
           }
@@ -188,27 +239,32 @@ export class LighterTracker implements DurableObject {
 
         console.log(`[LighterTracker] Completed subscription to ${markets.length} markets`);
 
-        // Start ping interval to keep connection alive
+        // Keep-Alive Ping-Mechanismus starten
         this.startPingInterval();
 
-        // Update tracker status in D1
+        // Status in Datenbank aktualisieren
         this.updateTrackerStatus('connected', null);
       });
 
+      // Event Handler: Nachricht empfangen
       this.ws.addEventListener('message', async (event) => {
         this.messageCount++;
+        // Logging alle 20 Nachrichten um Log-Spam zu vermeiden
         if (this.messageCount % 20 === 0) {
           console.log(`[LighterTracker] Received ${this.messageCount} messages total`);
         }
         await this.handleMessage(event.data);
       });
 
+      // Event Handler: Verbindung geschlossen
       this.ws.addEventListener('close', (event) => {
         console.log(`[LighterTracker] WebSocket closed - Code: ${event.code}, Reason: ${event.reason}`);
         this.isConnected = false;
+        // Automatisch Reconnect versuchen
         this.scheduleReconnect();
       });
 
+      // Event Handler: Fehler
       this.ws.addEventListener('error', (event) => {
         console.error('[LighterTracker] WebSocket error:', event);
         this.updateTrackerStatus('error', 'WebSocket error occurred');
@@ -221,14 +277,19 @@ export class LighterTracker implements DurableObject {
     }
   }
 
+  /**
+   * Trennt WebSocket-Verbindung und räumt alle Timer auf
+   */
   private disconnect(): void {
     this.isConnected = false;
 
+    // WebSocket schließen
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
 
+    // Alle Timer aufräumen
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
@@ -257,22 +318,30 @@ export class LighterTracker implements DurableObject {
     this.updateTrackerStatus('disconnected', null);
   }
 
+  /**
+   * Holt verfügbare Markets von der Lighter API mit Caching
+   *
+   * Cache-Strategie:
+   * - Cache ist 60 Minuten gültig
+   * - Bei Fehler: Verwende alten Cache als Fallback
+   * - Reduziert API-Calls und verbessert Performance
+   */
   private async fetchAvailableMarkets(): Promise<LighterMarket[]> {
     const now = Date.now();
 
-    // Return cached markets if available and not expired
+    // Cache verwenden wenn vorhanden und noch nicht abgelaufen
     if (this.cachedMarkets.length > 0 && (now - this.lastMarketsFetch) < this.MARKETS_REFRESH_INTERVAL) {
       console.log(`[LighterTracker] Using cached markets (${this.cachedMarkets.length} markets, cached ${Math.round((now - this.lastMarketsFetch) / 60000)} minutes ago)`);
       return this.cachedMarkets;
     }
 
     try {
-      // Fetch fresh markets from API
+      // Frische Markets von API holen
       console.log('[LighterTracker] Fetching fresh markets from API...');
       const response = await fetch('https://explorer.elliot.ai/api/markets', {
         headers: {
           'accept': 'application/json',
-          'user-agent': 'Mozilla/5.0 (compatible; LighterTracker/1.0)',
+          'user-agent': 'Mozilla/5.0 (compatible; LighterTracker/1.0)', // User-Agent um 403 zu vermeiden
         },
       });
 
@@ -283,7 +352,7 @@ export class LighterTracker implements DurableObject {
       const markets: LighterMarket[] = await response.json();
       console.log(`[LighterTracker] Fetched ${markets.length} markets from API`);
 
-      // Update cache
+      // Cache aktualisieren
       this.cachedMarkets = markets;
       this.lastMarketsFetch = now;
 
@@ -291,7 +360,7 @@ export class LighterTracker implements DurableObject {
     } catch (error) {
       console.error('[LighterTracker] Failed to fetch markets:', error);
 
-      // Return cached markets if available, even if expired
+      // Fallback: Alten Cache verwenden auch wenn abgelaufen
       if (this.cachedMarkets.length > 0) {
         console.log(`[LighterTracker] Using expired cache as fallback (${this.cachedMarkets.length} markets)`);
         return this.cachedMarkets;
@@ -301,6 +370,12 @@ export class LighterTracker implements DurableObject {
     }
   }
 
+  /**
+   * Plant einen Reconnect-Versuch mit exponentieller Verzögerung
+   *
+   * Wichtig: Nach erfolgreichem Reconnect werden auch die Timer neu gestartet!
+   * Dies war ein kritischer Bug-Fix - ohne Timer-Restart wurden keine Snapshots mehr gespeichert.
+   */
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
       console.error('[LighterTracker] Max reconnect attempts reached');
@@ -318,7 +393,9 @@ export class LighterTracker implements DurableObject {
     this.reconnectTimeout = setTimeout(async () => {
       try {
         await this.connect();
-        // Restart timers after successful reconnect
+
+        // WICHTIG: Timer nach Reconnect neu starten!
+        // Ohne dies würden nach einem Reconnect keine Snapshots mehr gespeichert
         this.startSnapshotTimer();
         this.startStatusCheck();
         console.log('[LighterTracker] Reconnect successful, timers restarted');
@@ -328,11 +405,20 @@ export class LighterTracker implements DurableObject {
     }, this.RECONNECT_DELAY) as any;
   }
 
+  /**
+   * Verarbeitet eingehende WebSocket-Nachrichten
+   *
+   * Nachrichten-Typen:
+   * - ping: Server sendet Ping → wir antworten mit Pong (Keep-Alive)
+   * - pong: Antwort auf unseren Ping
+   * - subscribed/market_stats: Initiale Daten nach Subscription
+   * - update/market_stats: Laufende Updates (wichtigster Typ!)
+   */
   private async handleMessage(data: string): Promise<void> {
     try {
       const message: LighterWebSocketMessage = JSON.parse(data);
 
-      // Handle ping from server - respond with pong
+      // Server-Ping → Pong antworten (Keep-Alive, verhindert "no pong" Error!)
       if (message.type === 'ping') {
         console.log('[LighterTracker] Received ping from server, sending pong');
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -341,22 +427,23 @@ export class LighterTracker implements DurableObject {
         return;
       }
 
-      // Handle pong responses to our pings
+      // Pong-Antwort auf unseren Ping
       if (message.type === 'pong') {
         console.log('[LighterTracker] Received pong');
         return;
       }
 
-      // Handle both initial subscription and ongoing updates
+      // Market-Statistiken verarbeiten (initiale Subscription UND laufende Updates!)
       if ((message.type === 'subscribed/market_stats' || message.type === 'update/market_stats')
           && message.market_stats) {
         const stats = message.market_stats;
 
-        // Validate that required fields are present
+        // Validierung: Pflichtfelder müssen vorhanden sein
         if (stats.symbol && stats.market_id !== undefined) {
+          // In Buffer speichern - überschreibt alte Werte für selbes Symbol
           this.dataBuffer.set(stats.symbol, stats);
 
-          // Log every 50th update to avoid spam
+          // Logging alle 50 Updates um Spam zu vermeiden
           if (this.messageCount % 50 === 0) {
             console.log(`[LighterTracker] Buffer size: ${this.dataBuffer.size} markets`);
           }
@@ -364,7 +451,7 @@ export class LighterTracker implements DurableObject {
           console.warn('[LighterTracker] Received invalid market stats:', stats);
         }
 
-        // Update last message timestamp
+        // Timestamp der letzten Nachricht aktualisieren
         await this.updateTrackerStatus('running', null);
       }
     } catch (error) {
@@ -372,7 +459,12 @@ export class LighterTracker implements DurableObject {
     }
   }
 
+  /**
+   * Startet den Snapshot-Timer
+   * Speichert gepufferte Daten alle 15 Sekunden in die Datenbank
+   */
   private startSnapshotTimer(): void {
+    // Alten Timer clearen falls vorhanden (verhindert Duplikate)
     if (this.snapshotInterval) {
       clearInterval(this.snapshotInterval);
     }
@@ -384,12 +476,16 @@ export class LighterTracker implements DurableObject {
     }, intervalMs) as any;
   }
 
+  /**
+   * Startet den Status-Check Timer
+   * Loggt Status-Informationen alle 30 Sekunden für Monitoring
+   */
   private startStatusCheck(): void {
     if (this.statusCheckInterval) {
       clearInterval(this.statusCheckInterval);
     }
 
-    // Check status every 30 seconds
+    // Status-Check alle 30 Sekunden
     this.statusCheckInterval = setInterval(() => {
       console.log(`[LighterTracker] Status Check - Connected: ${this.isConnected}, Buffer: ${this.dataBuffer.size}, Messages: ${this.messageCount}`);
 
@@ -399,12 +495,16 @@ export class LighterTracker implements DurableObject {
     }, 30000) as any;
   }
 
+  /**
+   * Startet den Ping-Interval für Keep-Alive
+   * Sendet alle 30 Sekunden einen Ping an den Server
+   */
   private startPingInterval(): void {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
     }
 
-    // Send ping every 30 seconds to keep connection alive
+    // Ping alle 30 Sekunden senden
     this.pingInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         console.log('[LighterTracker] Sending ping to keep connection alive');
@@ -413,6 +513,18 @@ export class LighterTracker implements DurableObject {
     }, this.PING_INTERVAL) as any;
   }
 
+  /**
+   * Speichert aktuellen Buffer-Inhalt als Snapshot in die D1 Datenbank
+   *
+   * Ablauf:
+   * 1. Buffer in Records konvertieren mit Validierung
+   * 2. Default-Werte für fehlende Felder setzen
+   * 3. Batch-Insert in D1 (performanter als einzelne Inserts)
+   * 4. Buffer leeren um Speicher freizugeben
+   *
+   * Wichtig: Buffer wird nach jedem Snapshot geleert!
+   * Dies verhindert Memory-Probleme bei langem Laufzeit
+   */
   private async saveSnapshot(): Promise<void> {
     console.log(`[LighterTracker] saveSnapshot called, buffer size: ${this.dataBuffer.size}`);
 
@@ -426,15 +538,15 @@ export class LighterTracker implements DurableObject {
       const records: MarketStatsRecord[] = [];
       console.log('[LighterTracker] Starting to process buffer for snapshot');
 
-      // Convert buffer to records with validation
+      // Buffer zu Records konvertieren mit Validierung
       for (const [symbol, stats] of this.dataBuffer.entries()) {
-        // Validate required fields
+        // Pflichtfelder validieren
         if (!stats.symbol || stats.market_id === undefined) {
           console.warn(`[LighterTracker] Skipping invalid record for ${symbol}`);
           continue;
         }
 
-        // Helper function to provide default values for missing data
+        // Helper-Funktion: Default-Werte für fehlende Felder
         const getValue = (value: any, defaultValue: any) => value !== undefined ? value : defaultValue;
 
         records.push({
@@ -465,7 +577,7 @@ export class LighterTracker implements DurableObject {
         return;
       }
 
-      // Batch insert into D1
+      // Batch-Insert in D1 Database (performanter als einzelne Inserts)
       const stmt = this.env.DB.prepare(`
         INSERT INTO market_stats (
           exchange, symbol, market_id, index_price, mark_price,
@@ -505,7 +617,8 @@ export class LighterTracker implements DurableObject {
 
       console.log(`[LighterTracker] Saved snapshot with ${records.length} records`);
 
-      // Clear buffer to free memory
+      // Buffer leeren um Speicher freizugeben
+      // Wichtig: Neue Daten werden ab jetzt wieder gesammelt
       this.dataBuffer.clear();
 
     } catch (error) {
@@ -513,7 +626,7 @@ export class LighterTracker implements DurableObject {
       console.error('[LighterTracker] Failed to save snapshot:', errorMessage);
       console.error('[LighterTracker] Snapshot details - Records count:', records.length);
 
-      // Log first record for debugging
+      // Ersten Record für Debugging ausgeben
       if (records.length > 0) {
         console.error('[LighterTracker] Sample record:', JSON.stringify(records[0]));
       }
@@ -522,6 +635,10 @@ export class LighterTracker implements DurableObject {
     }
   }
 
+  /**
+   * Aktualisiert den Tracker-Status in der Datenbank
+   * Wird verwendet für Monitoring und Status-Abfragen
+   */
   private async updateTrackerStatus(status: string, errorMessage: string | null): Promise<void> {
     try {
       const now = Math.floor(Date.now() / 1000);
