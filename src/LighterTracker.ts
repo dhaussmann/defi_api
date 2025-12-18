@@ -107,16 +107,34 @@ export class LighterTracker implements DurableObject {
   }
 
   private async handleDebug(): Promise<Response> {
-    return Response.json({
-      success: true,
-      debug: {
-        connected: this.isConnected,
-        messageCount: this.messageCount,
-        bufferSize: this.dataBuffer.size,
-        bufferedSymbols: Array.from(this.dataBuffer.keys()).slice(0, 10),
-        wsReadyState: this.ws?.readyState,
-      },
-    });
+    try {
+      const markets = await this.fetchAvailableMarkets();
+
+      return Response.json({
+        success: true,
+        debug: {
+          connected: this.isConnected,
+          messageCount: this.messageCount,
+          bufferSize: this.dataBuffer.size,
+          bufferedSymbols: Array.from(this.dataBuffer.keys()).slice(0, 10),
+          wsReadyState: this.ws?.readyState,
+          availableMarketsCount: markets.length,
+          sampleMarkets: markets.slice(0, 5),
+        },
+      });
+    } catch (error) {
+      return Response.json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Debug failed',
+        debug: {
+          connected: this.isConnected,
+          messageCount: this.messageCount,
+          bufferSize: this.dataBuffer.size,
+          bufferedSymbols: Array.from(this.dataBuffer.keys()).slice(0, 10),
+          wsReadyState: this.ws?.readyState,
+        },
+      });
+    }
   }
 
   private async connect(): Promise<void> {
@@ -127,23 +145,40 @@ export class LighterTracker implements DurableObject {
         this.ws = null;
       }
 
+      // Fetch available markets from Lighter API
+      console.log('[LighterTracker] Fetching available markets...');
+      const markets = await this.fetchAvailableMarkets();
+      console.log(`[LighterTracker] Found ${markets.length} markets to track`);
+
       // Create WebSocket connection
       this.ws = new WebSocket('wss://mainnet.zklighter.elliot.ai/stream');
 
       // Set up event handlers
-      this.ws.addEventListener('open', () => {
+      this.ws.addEventListener('open', async () => {
         console.log('[LighterTracker] WebSocket connected');
         this.isConnected = true;
         this.reconnectAttempts = 0;
 
-        // Subscribe to ALL markets using market_stats/all channel
-        const subscribeMsg: LighterSubscribeMessage = {
-          type: 'subscribe',
-          channel: 'market_stats/all',
-        };
+        // Subscribe to each market individually
+        console.log(`[LighterTracker] Starting to subscribe to ${markets.length} markets...`);
 
-        this.ws?.send(JSON.stringify(subscribeMsg));
-        console.log('[LighterTracker] Subscribed to market_stats/all');
+        for (let i = 0; i < markets.length; i++) {
+          const market = markets[i];
+          const subscribeMsg: LighterSubscribeMessage = {
+            type: 'subscribe',
+            channel: `market_stats/${market.market_index}`,
+          };
+
+          this.ws?.send(JSON.stringify(subscribeMsg));
+
+          // Add small delay every 10 subscriptions to avoid overwhelming
+          if ((i + 1) % 10 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            console.log(`[LighterTracker] Subscribed to ${i + 1}/${markets.length} markets`);
+          }
+        }
+
+        console.log(`[LighterTracker] Completed subscription to ${markets.length} markets`);
 
         // Start ping interval to keep connection alive
         this.startPingInterval();
@@ -207,6 +242,29 @@ export class LighterTracker implements DurableObject {
     }
 
     this.updateTrackerStatus('disconnected', null);
+  }
+
+  private async fetchAvailableMarkets(): Promise<LighterMarket[]> {
+    try {
+      // Use proper headers to avoid 403 blocking
+      const response = await fetch('https://explorer.elliot.ai/api/markets', {
+        headers: {
+          'accept': 'application/json',
+          'user-agent': 'Mozilla/5.0 (compatible; LighterTracker/1.0)',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch markets: ${response.status}`);
+      }
+
+      const markets: LighterMarket[] = await response.json();
+      console.log(`[LighterTracker] Fetched ${markets.length} markets from API`);
+      return markets;
+    } catch (error) {
+      console.error('[LighterTracker] Failed to fetch markets:', error);
+      throw error;
+    }
   }
 
   private scheduleReconnect(): void {
