@@ -14,12 +14,14 @@ export class LighterTracker implements DurableObject {
   private reconnectTimeout: number | null = null;
   private snapshotInterval: number | null = null;
   private statusCheckInterval: number | null = null;
+  private pingInterval: number | null = null;
   private dataBuffer: Map<string, LighterMarketStats> = new Map();
   private isConnected = false;
   private reconnectAttempts = 0;
   private messageCount = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 10;
   private readonly RECONNECT_DELAY = 5000;
+  private readonly PING_INTERVAL = 30000; // 30 seconds
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -145,6 +147,9 @@ export class LighterTracker implements DurableObject {
 
         console.log(`[LighterTracker] Completed subscription to ${markets.length} markets`);
 
+        // Start ping interval to keep connection alive
+        this.startPingInterval();
+
         // Update tracker status in D1
         this.updateTrackerStatus('connected', null);
       });
@@ -198,6 +203,11 @@ export class LighterTracker implements DurableObject {
       this.statusCheckInterval = null;
     }
 
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+
     this.updateTrackerStatus('disconnected', null);
   }
 
@@ -247,6 +257,12 @@ export class LighterTracker implements DurableObject {
     try {
       const message: LighterWebSocketMessage = JSON.parse(data);
 
+      // Handle pong responses
+      if (message.type === 'pong') {
+        console.log('[LighterTracker] Received pong');
+        return;
+      }
+
       if (message.type === 'subscribed/market_stats' && message.market_stats) {
         const stats = message.market_stats;
 
@@ -295,6 +311,20 @@ export class LighterTracker implements DurableObject {
         console.log(`[LighterTracker] WebSocket ready state: ${this.ws.readyState} (1=OPEN)`);
       }
     }, 30000) as any;
+  }
+
+  private startPingInterval(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+    }
+
+    // Send ping every 30 seconds to keep connection alive
+    this.pingInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        console.log('[LighterTracker] Sending ping to keep connection alive');
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, this.PING_INTERVAL) as any;
   }
 
   private async saveSnapshot(): Promise<void> {
