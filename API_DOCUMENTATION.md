@@ -42,6 +42,7 @@ https://defiapi.cloudflareone-demo-account.workers.dev
 | `/api/compare?token=BTC` | GET | Token-Vergleich über alle Börsen |
 | `/api/funding-history?symbol=BTC` | GET | Historische Funding Rates (ab Jan 2025) |
 | `/api/market-history?symbol=BTC` | GET | Historische Market-Daten (Preise, Volume, OI, Funding) |
+| `/api/volatility?symbol=BTC&interval=1h` | GET | Echtzeit-Volatilität (letzte 7 Tage) |
 | `/api/stats?exchange=hyperliquid` | GET | Market-Statistiken einer Börse |
 | `/api/stats?symbol=BTC` | GET | Statistiken für ein bestimmtes Symbol |
 | `/api/stats?exchange=lighter&symbol=ETH` | GET | Statistiken für Symbol auf spezifischer Börse |
@@ -573,7 +574,96 @@ curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/market-history?
 
 ---
 
-### 4. Neueste Market Stats
+### 4. Echtzeit-Volatilität
+
+**NEU:** Berechnet Volatilität aus Live-Daten der letzten 7 Tage.
+
+```bash
+GET /api/volatility
+```
+
+**Query-Parameter:**
+
+| Parameter | Typ | Pflicht | Default | Beschreibung |
+|-----------|-----|---------|---------|--------------|
+| `symbol` | string | Nein | - | Filtert nach Symbol (z.B. `BTC`, `ETH`) |
+| `exchange` | string | Nein | - | Filtert nach Exchange |
+| `interval` | string | Nein | `1h` | Zeitintervall: `15m`, `1h`, `4h`, `1d` |
+| `limit` | number | Nein | `24` | Maximale Anzahl Intervalle (1-1000) |
+
+**Beispiele:**
+
+```bash
+# BTC Stunden-Volatilität (letzte 24h)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/volatility?symbol=BTC&interval=1h&limit=24"
+
+# ETH 4-Stunden-Volatilität auf Hyperliquid
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/volatility?symbol=ETH&exchange=hyperliquid&interval=4h"
+
+# Alle Token Tages-Volatilität
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/volatility?interval=1d&limit=7"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "exchange": "hyperliquid",
+      "symbol": "BTC",
+      "bucket_time": 1766596800,
+      "min_price": 94100.0,
+      "max_price": 94500.0,
+      "avg_price": 94250.5,
+      "sample_count": 240,
+      "volatility": 0.424,
+      "timestamp": "2025-12-24 17:00:00"
+    }
+  ],
+  "stats": {
+    "count": 24,
+    "volatility": {
+      "avg": 0.38,
+      "min": 0.15,
+      "max": 0.82,
+      "current": 0.424
+    },
+    "price": {
+      "current": 94250.5,
+      "min": 93500.0,
+      "max": 95100.0
+    },
+    "time_range": {
+      "from": "2025-12-23 17:00:00",
+      "to": "2025-12-24 17:00:00"
+    }
+  },
+  "meta": {
+    "symbol": "BTC",
+    "exchange": "all",
+    "interval": "1h",
+    "limit": 24
+  }
+}
+```
+
+**Besonderheiten:**
+- **Echtzeit-Berechnung**: Aus aktuellen `market_stats` Daten (letzte 7 Tage)
+- **Volatilitäts-Formel**: `(max_price - min_price) / avg_price × 100`
+- **Flexible Intervalle**: 15m für Intraday, 1h/4h für Day-Trading, 1d für Swing-Trading
+- **Sample Count**: Zeigt Anzahl der 15s-Snapshots pro Intervall (z.B. ~240 für 1h)
+- **Alle 7 Exchanges**: Sofort verfügbar für alle Exchanges
+
+**Interpretation:**
+- `volatility: 0.424` = 0.424% Preisschwankung in diesem Intervall
+- Höhere Werte = größere Volatilität = höheres Risiko/Chance
+- `current` = Volatilität des aktuellsten Intervalls
+- `avg` = Durchschnittliche Volatilität über den Zeitraum
+
+---
+
+### 5. Neueste Market Stats
 
 Liefert die neuesten Daten für jedes Symbol (ein Datensatz pro Symbol).
 
@@ -637,7 +727,7 @@ curl "https://defiapi.workers.dev/api/latest?exchange=hyperliquid&symbol=BTC"
 }
 ```
 
-### 5. Historische Market Stats
+### 6. Historische Market Stats
 
 Liefert historische Daten mit Filtermöglichkeiten.
 
@@ -694,7 +784,7 @@ curl "https://defiapi.workers.dev/api/stats?exchange=lighter&symbol=ETH&limit=20
 }
 ```
 
-### 6. Tracker Status (Datenbank)
+### 7. Tracker Status (Datenbank)
 
 Zeigt den Status aller Tracker aus der Datenbank.
 

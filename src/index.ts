@@ -209,6 +209,8 @@ async function handleApiRoute(
       return await getFundingRateHistory(env, url, corsHeaders);
     case '/api/market-history':
       return await getMarketHistory(env, url, corsHeaders);
+    case '/api/volatility':
+      return await getVolatility(env, url, corsHeaders);
     default:
       return new Response('API endpoint not found', {
         status: 404,
@@ -942,6 +944,142 @@ async function getMarketHistory(
       {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to get market history',
+      } as ApiResponse,
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
+// Get real-time volatility from market_stats (last 7 days)
+async function getVolatility(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const symbol = url.searchParams.get('symbol');
+    const exchange = url.searchParams.get('exchange');
+    const interval = url.searchParams.get('interval') || '1h'; // 1h, 4h, 1d
+    const limit = parseInt(url.searchParams.get('limit') || '24');
+
+    // Calculate interval in seconds
+    const intervalSeconds: { [key: string]: number } = {
+      '15m': 15 * 60,
+      '1h': 60 * 60,
+      '4h': 4 * 60 * 60,
+      '1d': 24 * 60 * 60,
+    };
+
+    const intervalSec = intervalSeconds[interval] || 3600;
+    const now = Math.floor(Date.now() / 1000);
+
+    // Build query to get data grouped by time intervals
+    let query = `
+      WITH time_buckets AS (
+        SELECT
+          exchange,
+          symbol,
+          (created_at / ?) * ? as bucket_time,
+          MIN(CAST(mark_price AS REAL)) as min_price,
+          MAX(CAST(mark_price AS REAL)) as max_price,
+          AVG(CAST(mark_price AS REAL)) as avg_price,
+          COUNT(*) as sample_count
+        FROM market_stats
+        WHERE created_at > ?
+    `;
+
+    const params: any[] = [intervalSec, intervalSec, now - (7 * 24 * 60 * 60)];
+
+    if (symbol) {
+      query += ' AND symbol = ?';
+      params.push(symbol);
+    }
+
+    if (exchange) {
+      query += ' AND exchange = ?';
+      params.push(exchange);
+    }
+
+    query += `
+        GROUP BY exchange, symbol, bucket_time
+        ORDER BY bucket_time DESC
+        LIMIT ?
+      )
+      SELECT
+        exchange,
+        symbol,
+        bucket_time,
+        min_price,
+        max_price,
+        avg_price,
+        sample_count,
+        CASE
+          WHEN avg_price > 0
+          THEN ((max_price - min_price) / avg_price * 100)
+          ELSE 0
+        END as volatility,
+        datetime(bucket_time, 'unixepoch') as timestamp
+      FROM time_buckets
+      ORDER BY bucket_time DESC
+    `;
+
+    params.push(Math.min(limit, 1000));
+
+    const result = await env.DB.prepare(query).bind(...params).all();
+
+    if (!result.success || !result.results) {
+      throw new Error('Database query failed');
+    }
+
+    const volatilityData = result.results as any[];
+
+    // Calculate statistics
+    const stats: any = {
+      count: volatilityData.length,
+    };
+
+    if (volatilityData.length > 0) {
+      const volatilities = volatilityData.map(d => d.volatility);
+
+      stats.volatility = {
+        avg: volatilities.reduce((a, b) => a + b, 0) / volatilities.length,
+        min: Math.min(...volatilities),
+        max: Math.max(...volatilities),
+        current: volatilities[0], // Most recent
+      };
+
+      stats.price = {
+        current: volatilityData[0].avg_price,
+        min: Math.min(...volatilityData.map(d => d.min_price)),
+        max: Math.max(...volatilityData.map(d => d.max_price)),
+      };
+
+      stats.time_range = {
+        from: volatilityData[volatilityData.length - 1].timestamp,
+        to: volatilityData[0].timestamp,
+      };
+    }
+
+    return Response.json(
+      {
+        success: true,
+        data: volatilityData,
+        stats,
+        meta: {
+          symbol: symbol || 'all',
+          exchange: exchange || 'all',
+          interval,
+          limit: Math.min(limit, 1000),
+        },
+      } as ApiResponse,
+      { headers: corsHeaders }
+    );
+  } catch (error) {
+    console.error('[API] Error in getVolatility:', error);
+    return Response.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get volatility',
       } as ApiResponse,
       { status: 500, headers: corsHeaders }
     );
