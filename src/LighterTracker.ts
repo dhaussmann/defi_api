@@ -551,6 +551,11 @@ export class LighterTracker implements DurableObject {
         // Helper-Funktion: Default-Werte für fehlende Felder
         const getValue = (value: any, defaultValue: any) => value !== undefined ? value : defaultValue;
 
+        // Open Interest USD berechnen: Bei Lighter ist OI bereits in USD (einseitig)
+        // Für Gesamt-OI (Long + Short) müssen wir × 2 rechnen
+        const openInterest = parseFloat(getValue(stats.open_interest, '0'));
+        const openInterestUsd = (openInterest * 2).toString();
+
         records.push({
           exchange: 'lighter',
           symbol: stats.symbol,
@@ -558,6 +563,7 @@ export class LighterTracker implements DurableObject {
           index_price: getValue(stats.index_price, '0'),
           mark_price: getValue(stats.mark_price, '0'),
           open_interest: getValue(stats.open_interest, '0'),
+          open_interest_usd: openInterestUsd,
           open_interest_limit: getValue(stats.open_interest_limit, '0'),
           funding_clamp_small: getValue(stats.funding_clamp_small, '0'),
           funding_clamp_big: getValue(stats.funding_clamp_big, '0'),
@@ -583,12 +589,12 @@ export class LighterTracker implements DurableObject {
       const stmt = this.env.DB.prepare(`
         INSERT INTO market_stats (
           exchange, symbol, market_id, index_price, mark_price,
-          open_interest, open_interest_limit, funding_clamp_small,
+          open_interest, open_interest_usd, open_interest_limit, funding_clamp_small,
           funding_clamp_big, last_trade_price, current_funding_rate,
           funding_rate, funding_timestamp, daily_base_token_volume,
           daily_quote_token_volume, daily_price_low, daily_price_high,
           daily_price_change, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const batch = records.map((record) =>
@@ -599,6 +605,7 @@ export class LighterTracker implements DurableObject {
           record.index_price,
           record.mark_price,
           record.open_interest,
+          record.open_interest_usd,
           record.open_interest_limit,
           record.funding_clamp_small,
           record.funding_clamp_big,

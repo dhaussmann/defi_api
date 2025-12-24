@@ -572,6 +572,11 @@ export class ParadexTracker implements DurableObject {
         // Paradex hat keine market_id, wir verwenden einen Hash oder Index
         const marketId = this.getMarketIdForSymbol(symbol);
 
+        // Open Interest USD berechnen: OI * mark_price
+        const markPrice = parseFloat(getValue(data.mark_price, '0'));
+        const openInterest = parseFloat(getValue(data.open_interest, '0'));
+        const openInterestUsd = (markPrice * openInterest).toString();
+
         records.push({
           exchange: 'paradex',
           symbol: data.symbol,
@@ -579,6 +584,7 @@ export class ParadexTracker implements DurableObject {
           index_price: getValue(data.underlying_price, '0'),
           mark_price: getValue(data.mark_price, '0'),
           open_interest: getValue(data.open_interest, '0'),
+          open_interest_usd: openInterestUsd,
           open_interest_limit: '0', // Paradex hat dieses Feld nicht
           funding_clamp_small: '0', // Paradex hat dieses Feld nicht
           funding_clamp_big: '0', // Paradex hat dieses Feld nicht
@@ -604,12 +610,12 @@ export class ParadexTracker implements DurableObject {
       const stmt = this.env.DB.prepare(`
         INSERT INTO market_stats (
           exchange, symbol, market_id, index_price, mark_price,
-          open_interest, open_interest_limit, funding_clamp_small,
+          open_interest, open_interest_usd, open_interest_limit, funding_clamp_small,
           funding_clamp_big, last_trade_price, current_funding_rate,
           funding_rate, funding_timestamp, daily_base_token_volume,
           daily_quote_token_volume, daily_price_low, daily_price_high,
           daily_price_change, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const batch = records.map((record) =>
@@ -620,6 +626,7 @@ export class ParadexTracker implements DurableObject {
           record.index_price,
           record.mark_price,
           record.open_interest,
+          record.open_interest_usd,
           record.open_interest_limit,
           record.funding_clamp_small,
           record.funding_clamp_big,

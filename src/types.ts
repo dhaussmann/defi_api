@@ -47,6 +47,7 @@ export interface MarketStatsRecord {
   index_price: string;
   mark_price: string;
   open_interest: string;
+  open_interest_usd?: string;
   open_interest_limit: string;
   funding_clamp_small: string;
   funding_clamp_big: string;
@@ -159,11 +160,173 @@ export interface ParadexSubscribeMessage {
   id: number;
 }
 
+// Hyperliquid Exchange Types
+
+export interface HyperliquidUniverse {
+  name: string;
+  szDecimals: number;
+  maxLeverage: number;
+  onlyIsolated?: boolean;
+}
+
+export interface HyperliquidAssetCtx {
+  dayNtlVlm: string;
+  funding: string;
+  impactPxs: [string, string];
+  markPx: string;
+  midPx: string;
+  openInterest: string;
+  oraclePx: string;
+  premium: string;
+  prevDayPx: string;
+}
+
+export interface HyperliquidMetaAndAssetCtxs {
+  universe: HyperliquidUniverse[];
+  assetCtxs: HyperliquidAssetCtx[];
+}
+
+// EdgeX Exchange Types
+
+export interface EdgeXContract {
+  contractId: string;
+  contractName: string;
+  baseCoinId: string;
+  quoteCoinId: string;
+  enableTrade: boolean;
+  enableDisplay: boolean;
+}
+
+export interface EdgeXTickerData {
+  contractId: string;
+  contractName: string;
+  priceChange: string;
+  priceChangePercent: string;
+  trades: string;
+  size: string;
+  value: string;
+  high: string;
+  low: string;
+  open: string;
+  close: string;
+  lastPrice: string;
+  indexPrice: string;
+  oraclePrice: string;
+  openInterest: string;
+  fundingRate: string;
+  fundingTime: string;
+  nextFundingTime: string;
+  bestAskPrice: string;
+  bestBidPrice: string;
+}
+
+export interface EdgeXWebSocketMessage {
+  type: 'quote-event' | 'subscribe' | 'unsubscribe' | 'ping' | 'pong';
+  channel?: string;
+  content?: {
+    channel: string;
+    dataType: string;
+    data: EdgeXTickerData[];
+  };
+}
+
+export interface EdgeXSubscribeMessage {
+  type: 'subscribe';
+  channel: string;
+}
+
+// Aster Exchange Types
+
+export interface AsterSymbol {
+  symbol: string;
+  pair: string;
+  contractType: string;
+  status: string;
+  baseAsset: string;
+  quoteAsset: string;
+  marginAsset: string;
+  pricePrecision: number;
+  quantityPrecision: number;
+}
+
+export interface AsterExchangeInfo {
+  symbols: AsterSymbol[];
+}
+
+export interface AsterPremiumIndex {
+  symbol: string;
+  markPrice: string;
+  indexPrice: string;
+  estimatedSettlePrice: string;
+  lastFundingRate: string;
+  interestRate: string;
+  nextFundingTime: number;
+  time: number;
+}
+
+export interface AsterFundingInfo {
+  symbol: string;
+  interestRate: string;
+  time: number;
+  fundingIntervalHours: number;
+  fundingFeeCap: number;
+  fundingFeeFloor: number;
+}
+
+export interface AsterOpenInterest {
+  symbol: string;
+  openInterest: string;
+  time: number;
+}
+
+export interface AsterKline {
+  openTime: number;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+  closeTime: number;
+  quoteVolume: string;
+  trades: number;
+  takerBuyBaseVolume: string;
+  takerBuyQuoteVolume: string;
+  ignore: string;
+}
+
+// Pacifica Exchange Types
+
+export interface PacificaPriceData {
+  symbol: string;
+  funding: string;
+  next_funding: string;
+  oracle: string;
+  mark: string;
+  mid: string;
+  yesterday_price: string;
+  open_interest: string;
+  volume_24h: string;
+  timestamp: number;
+}
+
+export interface PacificaWebSocketMessage {
+  method?: string;
+  params?: {
+    source?: string;
+  };
+  data?: PacificaPriceData[];
+}
+
 // Cloudflare Workers Environment Bindings
 
 export interface Env {
   LIGHTER_TRACKER: DurableObjectNamespace;
   PARADEX_TRACKER: DurableObjectNamespace;
+  HYPERLIQUID_TRACKER: DurableObjectNamespace;
+  EDGEX_TRACKER: DurableObjectNamespace;
+  ASTER_TRACKER: DurableObjectNamespace;
+  PACIFICA_TRACKER: DurableObjectNamespace;
+  EXTENDED_TRACKER: DurableObjectNamespace;
   DB: D1Database;
   SNAPSHOT_INTERVAL_MS?: string;
 }

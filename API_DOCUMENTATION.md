@@ -1,30 +1,77 @@
 # DeFi API - Dokumentation
 
-WebSocket-basierter Tracker für Crypto-Börsen mit Cloudflare Workers & Durable Objects.
+Echtzeit-Tracker für Crypto-Börsen mit Cloudflare Workers & Durable Objects.
 
 ## 🎯 Übersicht
 
-Diese API sammelt und speichert Market-Statistiken von verschiedenen dezentralen Börsen in Echtzeit über WebSocket-Verbindungen.
+Diese API sammelt und speichert Market-Statistiken von verschiedenen dezentralen Börsen in Echtzeit.
 
 **Unterstützte Börsen:**
-- **Lighter** - Dezentraler Perpetual Futures Exchange
-- **Paradex** - Dezentraler Derivate Exchange (nur PERP-Märkte)
+- **Lighter** - Dezentraler Perpetual Futures Exchange (WebSocket)
+- **Paradex** - Dezentraler Derivate Exchange (WebSocket, nur PERP-Märkte)
+- **Hyperliquid** - Dezentraler Perpetual Futures Exchange (API Polling)
+- **EdgeX** - Dezentraler Perpetual Futures Exchange (WebSocket)
+- **Aster** - Dezentraler Perpetual Futures Exchange (API Polling)
+- **Pacifica** - Dezentraler Perpetual Futures Exchange (WebSocket)
+- **Extended** - Dezentraler Perpetual Futures Exchange (API Polling)
 
 **Technologie-Stack:**
 - Cloudflare Workers (API-Layer)
-- Durable Objects (WebSocket-Verbindungen & Buffering)
+- Durable Objects (WebSocket-Verbindungen & API Polling)
 - D1 Database (Persistente Datenspeicherung)
-- 15-Sekunden-Snapshots für Memory-Effizienz
+- 15-Sekunden-Snapshots/Polling für Memory-Effizienz
 
 ---
 
 ## 📡 Base URL
 
 ```
-https://defiapi.workers.dev
+https://defiapi.cloudflareone-demo-account.workers.dev
 ```
 
-(Ersetzen Sie dies mit Ihrer tatsächlichen Worker-URL)
+---
+
+## 🚀 Quick Start - Verfügbare API-Endpunkte
+
+### Haupt-Endpunkte
+
+| Endpunkt | Methode | Beschreibung |
+|----------|---------|--------------|
+| `/api/trackers` | GET | Status aller Exchange-Tracker |
+| `/api/tokens` | GET | Liste aller verfügbaren Token (normalisiert) |
+| `/api/compare?token=BTC` | GET | Token-Vergleich über alle Börsen |
+| `/api/funding-history?symbol=BTC` | GET | Historische Funding Rates (ab Jan 2025) |
+| `/api/market-history?symbol=BTC` | GET | Historische Market-Daten (Preise, Volume, OI, Funding) |
+| `/api/stats?exchange=hyperliquid` | GET | Market-Statistiken einer Börse |
+| `/api/stats?symbol=BTC` | GET | Statistiken für ein bestimmtes Symbol |
+| `/api/stats?exchange=lighter&symbol=ETH` | GET | Statistiken für Symbol auf spezifischer Börse |
+
+### Beispiel-Anfragen
+
+**1. Status aller Tracker abfragen:**
+```bash
+curl https://defiapi.cloudflareone-demo-account.workers.dev/api/trackers
+```
+
+**2. Alle verfügbaren Token auflisten:**
+```bash
+curl https://defiapi.cloudflareone-demo-account.workers.dev/api/tokens
+```
+
+**3. BTC über alle Börsen vergleichen:**
+```bash
+curl https://defiapi.cloudflareone-demo-account.workers.dev/api/compare?token=BTC
+```
+
+**4. Alle Märkte von Hyperliquid:**
+```bash
+curl https://defiapi.cloudflareone-demo-account.workers.dev/api/stats?exchange=hyperliquid
+```
+
+**5. ETH-Statistiken von allen Börsen:**
+```bash
+curl https://defiapi.cloudflareone-demo-account.workers.dev/api/stats?symbol=ETH
+```
 
 ---
 
@@ -114,6 +161,98 @@ GET  /tracker/paradex/debug
 
 **Hinweis:** Paradex filtert automatisch nur PERP-Märkte (`asset_kind === "PERP"`). PERP_OPTION und andere Märkte werden ausgeschlossen.
 
+### Hyperliquid Exchange
+
+Die gleichen Endpoints sind für Hyperliquid verfügbar:
+
+```bash
+POST /tracker/hyperliquid/start
+POST /tracker/hyperliquid/stop
+GET  /tracker/hyperliquid/status
+GET  /tracker/hyperliquid/debug
+```
+
+**Technische Details:**
+- **Polling-Intervall:** 15 Sekunden (synchronisiert auf :00, :15, :30, :45)
+- **API-Endpoint:** `https://api.hyperliquid.xyz/info` (POST mit `{"type":"metaAndAssetCtxs"}`)
+- **Daten-Mapping:** `universe`-Array (Symbole) wird mit `assetCtxs`-Array (Werte) über Index gemappt
+- **Automatisches Speichern:** Daten werden sofort nach jedem Poll in die Datenbank geschrieben
+
+### EdgeX Exchange
+
+Die gleichen Endpoints sind für EdgeX verfügbar:
+
+```bash
+POST /tracker/edgex/start
+POST /tracker/edgex/stop
+GET  /tracker/edgex/status
+GET  /tracker/edgex/debug
+```
+
+**Technische Details:**
+- **WebSocket-URL:** `wss://quote.edgex.exchange/api/v1/public/ws`
+- **Metadata-API:** `https://pro.edgex.exchange/api/v1/public/meta/getMetaData`
+- **Subscription-Format:** Jeder Contract wird einzeln im Channel `ticker.{contractId}` subscribt
+- **Contract-Anzahl:** ~232 aktive Contracts
+
+### Aster Exchange
+
+Die gleichen Endpoints sind für Aster verfügbar:
+
+```bash
+POST /tracker/aster/start
+POST /tracker/aster/stop
+GET  /tracker/aster/status
+GET  /tracker/aster/data
+```
+
+**Technische Details:**
+- **API-Base:** `https://fapi.asterdex.com/fapi/v1`
+- **Polling-Intervall:** 60 Sekunden
+- **Endpoints:** exchangeInfo, premiumIndex, fundingInfo, openInterest, klines
+- **Contract-Type:** Nur PERPETUAL Contracts
+- **Open Interest Berechnung:** OI * Preis (zum OI-Timestamp) * 2
+
+### Pacifica Exchange
+
+Die gleichen Endpoints sind für Pacifica verfügbar:
+
+```bash
+POST /tracker/pacifica/start
+POST /tracker/pacifica/stop
+GET  /tracker/pacifica/status
+GET  /tracker/pacifica/data
+```
+
+**Technische Details:**
+- **WebSocket-URL:** `wss://ws.pacifica.fi/ws`
+- **Subscription:** `{"method": "subscribe", "params": {"source": "prices"}}`
+- **Heartbeat:** Alle 30 Sekunden (Connection timeout nach 60s Inaktivität)
+- **Open Interest Berechnung:** OI * Mark Price
+- **Volume:** 24h Volume bereits in USD
+
+### Extended Exchange
+
+Die gleichen Endpoints sind für Extended verfügbar:
+
+```bash
+POST /tracker/extended/start
+POST /tracker/extended/stop
+GET  /tracker/extended/status
+GET  /tracker/extended/data
+```
+
+**Technische Details:**
+- **API-Base:** `https://api.starknet.extended.exchange/api/v1`
+- **Polling-Intervall:** 15 Sekunden (API Polling)
+- **Snapshot-Intervall:** 60 Sekunden (Speicherung in DB)
+- **Endpoint:** `/info/markets`
+- **User-Agent:** Browser-UA erforderlich (API blockt Cloudflare Workers standardmäßig)
+- **Filter:** Nur ACTIVE Markets (status: "ACTIVE" && active: true)
+- **Open Interest:** Bereits in USD (keine Berechnung erforderlich)
+- **Volume:** dailyVolume bereits in USD
+- **Symbol-Format:** `BTC-USD`, `ETH-USD`, etc.
+
 ### Backward Compatibility
 
 Für Abwärtskompatibilität routen `/tracker/*` Endpoints automatisch zu Lighter:
@@ -129,7 +268,312 @@ GET  /tracker/status   # → Lighter
 
 Diese Endpoints liefern gespeicherte Market-Daten aus der Datenbank.
 
-### 1. Neueste Market Stats
+### 1. Cross-Exchange Token-Vergleich
+
+**NEU:** Vergleichen Sie einen Token über alle unterstützten Börsen hinweg.
+
+```bash
+GET /api/compare?token=<TOKEN>
+```
+
+**Query-Parameter:**
+
+| Parameter | Typ | Pflicht | Beschreibung |
+|-----------|-----|---------|--------------|
+| `token` | string | Ja | Base Asset Symbol (z.B. `BTC`, `ETH`, `SOL`) |
+
+**Beispiele:**
+
+```bash
+# BTC über alle Börsen vergleichen
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/compare?token=BTC"
+
+# ETH über alle Börsen vergleichen
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/compare?token=ETH"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "token": "BTC",
+    "exchanges_count": 7,
+    "exchanges": [
+      {
+        "exchange": "aster",
+        "original_symbol": "BTCUSDT",
+        "normalized_symbol": "BTC",
+        "mark_price": 87494.2,
+        "index_price": 87525.5,
+        "open_interest": 5979.679,
+        "open_interest_usd": 1048821848.486,
+        "funding_rate": 0.00006133,
+        "funding_rate_annual": 6.72,
+        "next_funding_time": "1766419200000",
+        "volume_24h": 0,
+        "price_low_24h": 0,
+        "price_high_24h": 0,
+        "price_change_24h": 0,
+        "timestamp": "2025-12-23 07:47:57"
+      },
+      {
+        "exchange": "extended",
+        "original_symbol": "BTC-USD",
+        "normalized_symbol": "BTC",
+        "mark_price": 87440.32,
+        "index_price": 87482.75,
+        "open_interest": 48139617.83,
+        "open_interest_usd": 48139617.83,
+        "funding_rate": 0.000006,
+        "funding_rate_annual": 0.657,
+        "next_funding_time": "1766419200000",
+        "volume_24h": 504307335.62,
+        "price_low_24h": 87826,
+        "price_high_24h": 90496,
+        "price_change_24h": 1227,
+        "timestamp": "2025-12-23 07:47:29"
+      }
+      // ... weitere Börsen (hyperliquid, lighter, edgex, pacifica, paradex)
+    ],
+    "aggregated": {
+      "total_open_interest_usd": 4362746369.72,
+      "avg_price": 87503.29,
+      "min_price": 87307.74,
+      "max_price": 87541.6,
+      "price_spread_pct": 0.27,
+      "avg_funding_rate": 0.000176,
+      "avg_funding_rate_annual_pct": 19.27
+    }
+  }
+}
+```
+
+**Besonderheiten:**
+- Normalisiert automatisch verschiedene Symbol-Namen (BTC, BTCUSDT, BTC-USD, BTC-USD-PERP → BTC)
+- Berechnet aggregierte Statistiken über alle Börsen
+- Zeigt Preis-Spread und durchschnittliche Funding Rates
+- Nur die neuesten Daten für jede Börse (SQL Window Function)
+
+**Symbol-Normalisierung:**
+Die API erkennt automatisch folgende Varianten:
+- `BTCUSDT` (Aster) → `BTC`
+- `BTCUSD` (EdgeX) → `BTC`
+- `BTC-USD` (Extended) → `BTC`
+- `BTC-USD-PERP` (Paradex) → `BTC`
+- `BTC` (Hyperliquid, Lighter, Pacifica) → `BTC`
+- Präfixe wie `1000PEPE` → `PEPE` oder `kBONK` → `BONK`
+
+---
+
+### 2. Historische Funding Rates
+
+**NEU:** Abfrage historischer Funding Rate Daten (ab 1. Januar 2025).
+
+```bash
+GET /api/funding-history?symbol=<SYMBOL>
+```
+
+**Query-Parameter:**
+
+| Parameter | Typ | Pflicht | Default | Beschreibung |
+|-----------|-----|---------|---------|--------------|
+| `symbol` | string | Ja | - | Normalisiertes Token-Symbol (z.B. `BTC`, `ETH`, `SOL`) |
+| `exchange` | string | Nein | - | Filtert nach spezifischer Börse |
+| `from` | number | Nein | - | Start-Timestamp in Millisekunden |
+| `to` | number | Nein | - | End-Timestamp in Millisekunden |
+| `limit` | number | Nein | `1000` | Maximale Anzahl Ergebnisse (1-10000) |
+
+**Beispiele:**
+
+```bash
+# BTC Funding Rate History (neueste 100 Einträge)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/funding-history?symbol=BTC&limit=100"
+
+# BTC auf Hyperliquid
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/funding-history?symbol=BTC&exchange=hyperliquid&limit=500"
+
+# ETH für einen bestimmten Zeitraum (Januar 2025)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/funding-history?symbol=ETH&from=1735689600000&to=1738368000000"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "exchange": "hyperliquid",
+      "symbol": "BTC",
+      "trading_pair": "BTC",
+      "funding_rate": 0.0000125,
+      "funding_rate_percent": 0.00125,
+      "annualized_rate": 10.95,
+      "collected_at": 1735689600054,
+      "timestamp": "2025-01-01 00:00:00"
+    },
+    // ... weitere historische Einträge
+  ],
+  "stats": {
+    "count": 100,
+    "avg_rate": 37.38,
+    "min_rate": 10.95,
+    "max_rate": 54.21,
+    "time_range": {
+      "from": "2025-01-01 00:00:00",
+      "to": "2025-01-01 09:00:00"
+    }
+  },
+  "meta": {
+    "symbol": "BTC",
+    "exchange": "hyperliquid",
+    "interval": "1h",
+    "limit": 100
+  }
+}
+```
+
+**Besonderheiten:**
+- Stündliche Snapshots seit 1. Januar 2025
+- **Datenquellen kombiniert**:
+  - `funding_rate_history`: Importierte historische Daten (Hyperliquid, Lighter, Aster, Paradex seit 1.1.2025)
+  - `market_history`: Aggregierte Daten aus Live-Trackern (alle 7 Exchanges für Daten ≥ 7 Tage alt)
+- Automatische Deduplizierung bei Überschneidungen
+- Automatische Statistik-Berechnung (Durchschnitt, Min, Max)
+- Timestamps in Millisekunden und ISO-Format
+- Annualisierte Rates (APR in Prozent)
+- **Unterstützte Exchanges**: Alle 7 (Hyperliquid, Lighter, Aster, Paradex, EdgeX, Pacifica, Extended)
+
+**Funding Rate Berechnung:**
+- `funding_rate`: Dezimalformat (0.000125)
+- `funding_rate_percent`: Prozent (0.0125%)
+- `annualized_rate`: APR (10.95%)
+- Formel: `annualized_rate = funding_rate × 100 × 3 × 365`
+  - × 100: Dezimal zu Prozent
+  - × 3: Drei 8-Stunden-Perioden pro Tag
+  - × 365: Tage pro Jahr
+
+---
+
+### 3. Historische Market-Daten (Alle Metriken)
+
+**NEU:** Abfrage aggregierter historischer Market-Daten mit allen Metriken (Daten ≥ 7 Tage alt).
+
+```bash
+GET /api/market-history
+```
+
+**Query-Parameter:**
+
+| Parameter | Typ | Pflicht | Default | Beschreibung |
+|-----------|-----|---------|---------|--------------|
+| `symbol` | string | Nein | - | Normalisiertes Token-Symbol (z.B. `BTC`, `ETH`, `SOL`) |
+| `exchange` | string | Nein | - | Filtert nach spezifischer Börse |
+| `from` | number | Nein | - | Start-Timestamp in Sekunden |
+| `to` | number | Nein | - | End-Timestamp in Sekunden |
+| `limit` | number | Nein | `1000` | Maximale Anzahl Ergebnisse (1-10000) |
+| `metric` | string | Nein | `all` | Filter: `all`, `price`, `volume`, `oi`, `funding` |
+
+**Beispiele:**
+
+```bash
+# BTC Preis-History mit Volatilität
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/market-history?symbol=BTC&metric=price&limit=100"
+
+# Volumen-Analyse für alle Exchanges
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/market-history?metric=volume&limit=500"
+
+# Open Interest für ETH auf Hyperliquid
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/market-history?symbol=ETH&exchange=hyperliquid&metric=oi"
+
+# Funding Rates im Januar 2025
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/market-history?metric=funding&from=1735689600&to=1738368000"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "exchange": "hyperliquid",
+      "symbol": "BTC-USD",
+      "normalized_symbol": "BTC",
+      "avg_mark_price": 94250.5,
+      "avg_index_price": 94255.2,
+      "min_price": 94100.0,
+      "max_price": 94500.0,
+      "price_volatility": 0.424,
+      "volume_base": 125.5,
+      "volume_quote": 11829750.25,
+      "avg_open_interest": 1250000000,
+      "avg_open_interest_usd": 1250000000,
+      "max_open_interest_usd": 1255000000,
+      "avg_funding_rate": 0.0001,
+      "avg_funding_rate_annual": 10.95,
+      "min_funding_rate": 0.00008,
+      "max_funding_rate": 0.00012,
+      "hour_timestamp": 1735689600,
+      "sample_count": 240,
+      "timestamp": "2025-01-01 00:00:00"
+    }
+  ],
+  "stats": {
+    "count": 100,
+    "price": {
+      "avg": 94300.5,
+      "min": 93500.0,
+      "max": 95100.0,
+      "avg_volatility": 0.38
+    },
+    "volume": {
+      "total_usd": 1182975025.0,
+      "avg_hourly_usd": 11829750.25,
+      "max_hourly_usd": 15000000.0
+    },
+    "open_interest": {
+      "avg_usd": 1250000000,
+      "min_usd": 1240000000,
+      "max_usd": 1260000000
+    },
+    "funding_rate": {
+      "avg_apr": 10.5,
+      "min_apr": 8.2,
+      "max_apr": 12.8
+    },
+    "time_range": {
+      "from": "2025-01-01 00:00:00",
+      "to": "2025-01-05 03:00:00"
+    }
+  },
+  "meta": {
+    "symbol": "BTC",
+    "exchange": "all",
+    "metric": "all",
+    "limit": 100,
+    "interval": "1h"
+  }
+}
+```
+
+**Besonderheiten:**
+- **Stündliche Aggregation**: Daten älter als 7 Tage werden automatisch zu Stunden-Snapshots komprimiert
+- **Alle 7 Exchanges**: EdgeX, Pacifica, Extended werden erfasst (ab 7 Tage nach Tracker-Start)
+- **Volatilität berechnet**: `(max_price - min_price) / avg_price × 100`
+- **Sample Count**: Zeigt wie viele 15s-Snapshots in jede Stunde aggregiert wurden (~240 bei voller Verfügbarkeit)
+- **Metric Filter**: Optimiert Statistik-Berechnung auf gewünschte Metrik
+- **Automatische Aggregation**: Läuft jede Stunde zur vollen Stunde via Cron
+
+**Anwendungsfälle:**
+- Langfristige Preis-Trends und Volatilitätsanalyse
+- Volumen-Muster über Wochen/Monate
+- Open Interest Entwicklung
+- Funding Rate Korrelationen mit Preisbewegungen
+- Cross-Exchange Arbitrage-Analysen
+
+---
+
+### 4. Neueste Market Stats
 
 Liefert die neuesten Daten für jedes Symbol (ein Datensatz pro Symbol).
 
@@ -141,7 +585,7 @@ GET /api/latest
 
 | Parameter | Typ | Pflicht | Default | Beschreibung |
 |-----------|-----|---------|---------|--------------|
-| `exchange` | string | Nein | `lighter` | Exchange-Name (`lighter`, `paradex`) |
+| `exchange` | string | Nein | `lighter` | Exchange-Name (`lighter`, `paradex`, `hyperliquid`, `edgex`, `aster`, `pacifica`, `extended`) |
 | `symbol` | string | Nein | - | Filtert nach einem bestimmten Symbol |
 
 **Beispiele:**
@@ -153,8 +597,11 @@ curl "https://defiapi.workers.dev/api/latest?exchange=lighter"
 # Neueste Stats von Paradex
 curl "https://defiapi.workers.dev/api/latest?exchange=paradex"
 
-# Nur BTC-USD-PERP von Paradex
-curl "https://defiapi.workers.dev/api/latest?exchange=paradex&symbol=BTC-USD-PERP"
+# Neueste Stats von Hyperliquid
+curl "https://defiapi.workers.dev/api/latest?exchange=hyperliquid"
+
+# Nur BTC von Hyperliquid
+curl "https://defiapi.workers.dev/api/latest?exchange=hyperliquid&symbol=BTC"
 ```
 
 **Response:**
@@ -190,7 +637,7 @@ curl "https://defiapi.workers.dev/api/latest?exchange=paradex&symbol=BTC-USD-PER
 }
 ```
 
-### 2. Historische Market Stats
+### 5. Historische Market Stats
 
 Liefert historische Daten mit Filtermöglichkeiten.
 
@@ -202,7 +649,7 @@ GET /api/stats
 
 | Parameter | Typ | Pflicht | Default | Beschreibung |
 |-----------|-----|---------|---------|--------------|
-| `exchange` | string | Nein | `lighter` | Exchange-Name (`lighter`, `paradex`) |
+| `exchange` | string | Nein | `lighter` | Exchange-Name (`lighter`, `paradex`, `hyperliquid`, `edgex`, `aster`, `pacifica`, `extended`) |
 | `symbol` | string | Nein | - | Filtert nach Symbol |
 | `from` | number | Nein | - | Start-Timestamp in Millisekunden |
 | `to` | number | Nein | - | End-Timestamp in Millisekunden |
@@ -211,11 +658,11 @@ GET /api/stats
 **Beispiele:**
 
 ```bash
-# Letzte 50 Einträge für BTC-USD-PERP
-curl "https://defiapi.workers.dev/api/stats?exchange=paradex&symbol=BTC-USD-PERP&limit=50"
+# Letzte 50 Einträge für BTC von Hyperliquid
+curl "https://defiapi.workers.dev/api/stats?exchange=hyperliquid&symbol=BTC&limit=50"
 
-# Alle Paradex-Daten der letzten Stunde
-curl "https://defiapi.workers.dev/api/stats?exchange=paradex&from=1702908745000&to=1702912345000"
+# Alle Hyperliquid-Daten der letzten Stunde
+curl "https://defiapi.workers.dev/api/stats?exchange=hyperliquid&from=1702908745000&to=1702912345000"
 
 # Alle Lighter-Daten für ETH
 curl "https://defiapi.workers.dev/api/stats?exchange=lighter&symbol=ETH&limit=200"
@@ -247,7 +694,7 @@ curl "https://defiapi.workers.dev/api/stats?exchange=lighter&symbol=ETH&limit=20
 }
 ```
 
-### 3. Tracker Status (Datenbank)
+### 6. Tracker Status (Datenbank)
 
 Zeigt den Status aller Tracker aus der Datenbank.
 
@@ -277,6 +724,15 @@ GET /api/status
       "error_message": null,
       "reconnect_count": 0,
       "updated_at": 1702912346
+    },
+    {
+      "id": 3,
+      "exchange": "hyperliquid",
+      "status": "running",
+      "last_message_at": 1702912347,
+      "error_message": null,
+      "reconnect_count": 0,
+      "updated_at": 1702912347
     }
   ]
 }
@@ -293,7 +749,7 @@ Jeder Datensatz in der Datenbank enthält folgende Felder:
 | Feld | Typ | Beschreibung |
 |------|-----|--------------|
 | `id` | Integer | Eindeutige ID (Auto-Increment) |
-| `exchange` | String | Exchange-Name (`lighter`, `paradex`) |
+| `exchange` | String | Exchange-Name (`lighter`, `paradex`, `hyperliquid`, `edgex`) |
 | `symbol` | String | Trading-Paar Symbol (z.B. `BTC-USD-PERP`) |
 | `market_id` | Integer | Market-ID (exchange-spezifisch) |
 | `index_price` | String | Index-Preis des Underlying Assets |
@@ -318,7 +774,8 @@ Jeder Datensatz in der Datenbank enthält folgende Felder:
 - Preise sind als Strings gespeichert für hohe Präzision
 - Volumen und Preisänderungen sind als Float/Real gespeichert
 - Timestamps: `recorded_at` in Millisekunden, `created_at` in Sekunden
-- Felder mit `(Lighter only)` sind bei Paradex auf `"0"` gesetzt
+- Felder mit `(Lighter only)` sind bei Paradex und Hyperliquid auf `"0"` gesetzt
+- Bei Hyperliquid: Symbole sind kürzer (z.B. `BTC` statt `BTC-USD-PERP`)
 
 ---
 
@@ -333,12 +790,12 @@ from datetime import datetime, timedelta
 BASE_URL = "https://defiapi.workers.dev"
 
 # 1. Tracker starten
-response = requests.post(f"{BASE_URL}/tracker/paradex/start")
+response = requests.post(f"{BASE_URL}/tracker/hyperliquid/start")
 print(response.json())
 
 # 2. Neueste Daten abrufen
 response = requests.get(f"{BASE_URL}/api/latest", params={
-    "exchange": "paradex"
+    "exchange": "hyperliquid"
 })
 data = response.json()
 print(f"Found {data['meta']['count']} markets")
@@ -348,8 +805,8 @@ now = int(datetime.now().timestamp() * 1000)
 one_hour_ago = int((datetime.now() - timedelta(hours=1)).timestamp() * 1000)
 
 response = requests.get(f"{BASE_URL}/api/stats", params={
-    "exchange": "paradex",
-    "symbol": "BTC-USD-PERP",
+    "exchange": "hyperliquid",
+    "symbol": "BTC",
     "from": one_hour_ago,
     "to": now,
     "limit": 100
@@ -367,9 +824,9 @@ for entry in btc_data['data']:
 ```javascript
 const BASE_URL = "https://defiapi.workers.dev";
 
-// 1. Neueste Paradex-Daten abrufen
+// 1. Neueste Hyperliquid-Daten abrufen
 async function getLatestData() {
-  const response = await fetch(`${BASE_URL}/api/latest?exchange=paradex`);
+  const response = await fetch(`${BASE_URL}/api/latest?exchange=hyperliquid`);
   const data = await response.json();
 
   console.log(`Found ${data.meta.count} markets`);
@@ -387,7 +844,7 @@ async function getLatestData() {
 
 // 2. Funding Rate Monitor
 async function monitorFundingRates() {
-  const response = await fetch(`${BASE_URL}/api/latest?exchange=paradex`);
+  const response = await fetch(`${BASE_URL}/api/latest?exchange=hyperliquid`);
   const data = await response.json();
 
   // Finde hohe Funding Rates
@@ -416,21 +873,21 @@ monitorFundingRates();
 BASE_URL="https://defiapi.workers.dev"
 
 # Tracker starten
-curl -X POST "$BASE_URL/tracker/paradex/start"
+curl -X POST "$BASE_URL/tracker/hyperliquid/start"
 
 # Status prüfen
-curl "$BASE_URL/tracker/paradex/status" | jq .
+curl "$BASE_URL/tracker/hyperliquid/status" | jq .
 
 # Neueste Daten
-curl "$BASE_URL/api/latest?exchange=paradex" | jq '.data[0:5]'
+curl "$BASE_URL/api/latest?exchange=hyperliquid" | jq '.data[0:5]'
 
 # BTC Daten der letzten Stunde
 FROM=$(date -d '1 hour ago' +%s)000
 TO=$(date +%s)000
-curl "$BASE_URL/api/stats?exchange=paradex&symbol=BTC-USD-PERP&from=$FROM&to=$TO" | jq .
+curl "$BASE_URL/api/stats?exchange=hyperliquid&symbol=BTC&from=$FROM&to=$TO" | jq .
 
 # Funding Rates exportieren
-curl "$BASE_URL/api/latest?exchange=paradex" | \
+curl "$BASE_URL/api/latest?exchange=hyperliquid" | \
   jq -r '.data[] | [.symbol, .funding_rate, .mark_price] | @csv' > funding_rates.csv
 ```
 
@@ -440,26 +897,35 @@ curl "$BASE_URL/api/latest?exchange=paradex" | \
 
 Die Tracker starten **automatisch** bei jedem Request:
 
-- Wenn Sie einen API-Endpoint aufrufen, werden beide Tracker automatisch gestartet (falls nicht bereits aktiv)
-- Sie müssen `/tracker/start` nur manuell aufrufen, wenn Sie einen gestoppten Tracker neu starten möchten
-- Die Tracker verbinden sich automatisch neu bei Verbindungsabbrüchen (max. 10 Versuche)
+- Wenn Sie einen API-Endpoint aufrufen, werden alle drei Tracker automatisch gestartet (falls nicht bereits aktiv)
+- Sie müssen `/tracker/{exchange}/start` nur manuell aufrufen, wenn Sie einen gestoppten Tracker neu starten möchten
+- WebSocket-Tracker (Lighter, Paradex) verbinden sich automatisch neu bei Verbindungsabbrüchen (max. 10 Versuche)
+- Hyperliquid-Tracker pollt kontinuierlich alle 15 Sekunden (synchronisiert auf :00, :15, :30, :45)
 
 **Empfehlung:** Lassen Sie die Tracker einfach laufen. Sie starten automatisch und benötigen keine manuelle Verwaltung.
 
 ---
 
-## 📈 Snapshot-Mechanismus
+## 📈 Snapshot-Mechanismus & Polling
 
-**Wie funktioniert die Datenspeicherung?**
+**WebSocket-Tracker (Lighter, Paradex):**
 
 1. **WebSocket → Buffer:** Eingehende Market-Updates werden im RAM gebuffert
 2. **Buffer → Database:** Alle 15 Sekunden wird ein Snapshot in die D1-Datenbank geschrieben
 3. **Buffer Cleanup:** Nach dem Snapshot wird der Buffer geleert, um Speicher freizugeben
 
+**API-Polling-Tracker (Hyperliquid):**
+
+1. **API Poll:** Alle 15 Sekunden wird die API abgefragt (synchronisiert auf :00, :15, :30, :45)
+2. **universe ↔ assetCtxs Mapping:** Symbole aus `universe`-Array werden mit Werten aus `assetCtxs`-Array über Index gemappt
+3. **Sofortiges Speichern:** Daten werden direkt nach jedem erfolgreichen Poll in die Datenbank geschrieben
+4. **Timestamp-Synchronisation:** Polling ist zeitgesteuert für konsistente Timestamps
+
 **Vorteile:**
 - ✅ Memory-effizient (Buffer wird regelmäßig geleert)
 - ✅ Performance-optimiert (Batch-Inserts statt einzelne Inserts)
 - ✅ Reduzierte Datenbank-Load
+- ✅ Konsistente 15-Sekunden-Intervalle über alle Exchanges
 
 **Konfiguration:**
 ```toml
@@ -515,12 +981,13 @@ npx wrangler d1 execute defiapi-db --remote --command \
 ### Tracker Health Check
 
 ```bash
-# Status beider Tracker prüfen
+# Status aller Tracker prüfen
 curl https://defiapi.workers.dev/api/status | jq .
 
 # Detaillierte Debug-Info
-curl https://defiapi.workers.dev/tracker/paradex/debug | jq .
 curl https://defiapi.workers.dev/tracker/lighter/debug | jq .
+curl https://defiapi.workers.dev/tracker/paradex/debug | jq .
+curl https://defiapi.workers.dev/tracker/hyperliquid/debug | jq .
 ```
 
 ### Datenbank Queries
@@ -565,6 +1032,7 @@ npx wrangler deploy
 # 4. Tracker starten (automatisch beim ersten Request)
 curl -X POST https://your-worker.workers.dev/tracker/lighter/start
 curl -X POST https://your-worker.workers.dev/tracker/paradex/start
+curl -X POST https://your-worker.workers.dev/tracker/hyperliquid/start
 ```
 
 ---
@@ -608,5 +1076,25 @@ Bei Fragen oder Problemen:
 
 ---
 
-**Version:** 1.0.0
-**Letzte Aktualisierung:** 2024-12-18
+**Version:** 1.2.0
+**Letzte Aktualisierung:** 2024-12-19
+
+---
+
+## 📝 Changelog
+
+### v1.2.0 (2024-12-19)
+- ✨ EdgeX Exchange Support hinzugefügt
+- 🔌 WebSocket-basierter Tracker für ~232 EdgeX Contracts
+- 📊 Einzelne Subscription pro Contract (ticker.{contractId})
+
+### v1.1.0 (2024-12-19)
+- ✨ Hyperliquid Exchange Support hinzugefügt
+- 🔄 API-Polling-Mechanismus für Hyperliquid (alle 15 Sekunden)
+- ⏰ Zeitgesteuerte Polling-Synchronisation auf :00, :15, :30, :45
+- 📊 Unterstützung für universe ↔ assetCtxs Mapping
+
+### v1.0.0 (2024-12-18)
+- ✨ Lighter und Paradex Exchange Support
+- 🔌 WebSocket-basierte Tracker
+- 💾 15-Sekunden-Snapshots in D1 Database

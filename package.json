@@ -11,11 +11,17 @@
     "db:migrations:create": "wrangler d1 migrations create defiapi-db",
     "db:migrations:apply": "wrangler d1 migrations apply defiapi-db --remote"
   },
-  "keywords": ["cloudflare", "workers", "crypto", "tracker"],
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "crypto",
+    "tracker"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
+    "better-sqlite3": "^12.5.0",
     "typescript": "^5.3.3",
     "wrangler": "^3.80.0"
   }
