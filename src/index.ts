@@ -38,8 +38,8 @@ export default {
     }
 
     try {
-      // Ensure trackers are started automatically on any request
-      await ensureTrackersStarted(env);
+      // Trackers auto-start themselves via their fetch() methods
+      // No need to ping them on every request - removed ensureTrackersStarted()
 
       // Route requests
       if (path.startsWith('/tracker/')) {
@@ -64,51 +64,11 @@ export default {
   },
 };
 
-// Ensure all trackers are started automatically
-async function ensureTrackersStarted(env: Env): Promise<void> {
-  try {
-    // Start Lighter Tracker
-    const lighterId = env.LIGHTER_TRACKER.idFromName('lighter-main');
-    const lighterStub = env.LIGHTER_TRACKER.get(lighterId);
-    await lighterStub.fetch('https://internal/status');
-
-    // Start Paradex Tracker
-    const paradexId = env.PARADEX_TRACKER.idFromName('paradex-main');
-    const paradexStub = env.PARADEX_TRACKER.get(paradexId);
-    await paradexStub.fetch('https://internal/status');
-
-    // Start Hyperliquid Tracker
-    const hyperliquidId = env.HYPERLIQUID_TRACKER.idFromName('hyperliquid-main');
-    const hyperliquidStub = env.HYPERLIQUID_TRACKER.get(hyperliquidId);
-    await hyperliquidStub.fetch('https://internal/status');
-
-    // Start EdgeX Tracker
-    const edgexId = env.EDGEX_TRACKER.idFromName('edgex-main');
-    const edgexStub = env.EDGEX_TRACKER.get(edgexId);
-    await edgexStub.fetch('https://internal/status');
-
-    // Start Aster Tracker
-    const asterId = env.ASTER_TRACKER.idFromName('aster-main');
-    const asterStub = env.ASTER_TRACKER.get(asterId);
-    await asterStub.fetch('https://internal/status');
-
-    // Start Pacifica Tracker
-    const pacificaId = env.PACIFICA_TRACKER.idFromName('pacifica-main');
-    const pacificaStub = env.PACIFICA_TRACKER.get(pacificaId);
-    await pacificaStub.fetch('https://internal/status');
-
-    // Start Extended Tracker
-    console.log('[Worker] Starting Extended Tracker initialization');
-    const extendedId = env.EXTENDED_TRACKER.idFromName('extended-main');
-    console.log('[Worker] Extended ID created:', extendedId.toString());
-    const extendedStub = env.EXTENDED_TRACKER.get(extendedId);
-    console.log('[Worker] Extended stub obtained, calling fetch');
-    await extendedStub.fetch('https://internal/status');
-    console.log('[Worker] Extended Tracker initialized');
-  } catch (error) {
-    console.error('[Worker] Failed to ensure trackers started:', error);
-  }
-}
+// OPTIMIZATION: Removed ensureTrackersStarted() function
+// Trackers auto-start themselves when their Durable Objects receive their first request
+// This eliminates 7 unnecessary Durable Object calls on every API request
+// Previous load: 7 DO calls × N requests/min = significant overhead
+// New load: 0 DO calls for tracker initialization
 
 // Handle tracker control routes
 async function handleTrackerRoute(
@@ -248,26 +208,20 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
     console.log('[Cron] Starting normalized_tokens update');
 
     // Get latest data from each exchange
+    // OPTIMIZATION: Replaced expensive ROW_NUMBER window function with simpler MAX grouping
+    // Previous: ROW_NUMBER processes all rows to rank them
+    // New: MAX finds latest timestamp directly, then joins back for full row data
     const query = `
-      WITH ranked_data AS (
-        SELECT
-          exchange,
-          symbol,
-          mark_price,
-          index_price,
-          open_interest_usd,
-          daily_base_token_volume as volume_24h,
-          funding_rate,
-          next_funding_time,
-          daily_price_change,
-          daily_price_low,
-          daily_price_high,
-          created_at,
-          ROW_NUMBER() OVER (PARTITION BY exchange, symbol ORDER BY created_at DESC) as rn
+      SELECT ms1.*
+      FROM market_stats ms1
+      INNER JOIN (
+        SELECT exchange, symbol, MAX(created_at) as max_created
         FROM market_stats
         WHERE created_at > ?
-      )
-      SELECT * FROM ranked_data WHERE rn = 1
+        GROUP BY exchange, symbol
+      ) ms2 ON ms1.exchange = ms2.exchange
+           AND ms1.symbol = ms2.symbol
+           AND ms1.created_at = ms2.max_created
     `;
 
     const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300;
@@ -321,7 +275,7 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
           parseFloat(row.mark_price || '0'),
           parseFloat(row.index_price || '0'),
           parseFloat(row.open_interest_usd || '0'),
-          parseFloat(row.volume_24h || '0'),
+          parseFloat(row.daily_base_token_volume || '0'),
           fundingRate,
           fundingRateAnnual,
           row.next_funding_time ? parseInt(row.next_funding_time) : null,
@@ -1466,31 +1420,142 @@ async function getDataForTimeRange(
   return await getNormalizedData(env, newUrl, corsHeaders);
 }
 
-// Get data for last 24 hours
+// Get data for last 24 hours (with caching)
 async function getData24h(
   env: Env,
   url: URL,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
-  return await getDataForTimeRange(env, url, corsHeaders, 24);
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+  const exchange = url.searchParams.get('exchange') || 'all';
+
+  if (!symbol) {
+    return Response.json(
+      { success: false, error: 'Missing required parameter: symbol' } as ApiResponse,
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // OPTIMIZATION: Cache responses for 2 minutes to reduce DB load
+  const cacheKey = new Request(`https://cache/data/24h/${symbol}/${exchange}`, { method: 'GET' });
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (response) {
+    const newHeaders = new Headers(response.headers);
+    Object.entries(corsHeaders).forEach(([key, value]) => newHeaders.set(key, value));
+    newHeaders.set('X-Cache', 'HIT');
+    return new Response(response.body, { status: response.status, headers: newHeaders });
+  }
+
+  // Cache miss - fetch fresh data
+  response = await getDataForTimeRange(env, url, corsHeaders, 24);
+
+  // Cache successful responses for 2 minutes (120 seconds)
+  if (response.ok) {
+    const cacheResponse = response.clone();
+    const newHeaders = new Headers(cacheResponse.headers);
+    newHeaders.set('Cache-Control', 'public, max-age=120');
+    const cachedResponse = new Response(cacheResponse.body, {
+      status: cacheResponse.status,
+      headers: newHeaders
+    });
+    await cache.put(cacheKey, cachedResponse);
+  }
+
+  return response;
 }
 
-// Get data for last 7 days
+// Get data for last 7 days (with caching)
 async function getData7d(
   env: Env,
   url: URL,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
-  return await getDataForTimeRange(env, url, corsHeaders, 168);
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+  const exchange = url.searchParams.get('exchange') || 'all';
+
+  if (!symbol) {
+    return Response.json(
+      { success: false, error: 'Missing required parameter: symbol' } as ApiResponse,
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // OPTIMIZATION: Cache responses for 5 minutes to reduce DB load
+  const cacheKey = new Request(`https://cache/data/7d/${symbol}/${exchange}`, { method: 'GET' });
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (response) {
+    const newHeaders = new Headers(response.headers);
+    Object.entries(corsHeaders).forEach(([key, value]) => newHeaders.set(key, value));
+    newHeaders.set('X-Cache', 'HIT');
+    return new Response(response.body, { status: response.status, headers: newHeaders });
+  }
+
+  // Cache miss - fetch fresh data
+  response = await getDataForTimeRange(env, url, corsHeaders, 168);
+
+  // Cache successful responses for 5 minutes (300 seconds)
+  if (response.ok) {
+    const cacheResponse = response.clone();
+    const newHeaders = new Headers(cacheResponse.headers);
+    newHeaders.set('Cache-Control', 'public, max-age=300');
+    const cachedResponse = new Response(cacheResponse.body, {
+      status: cacheResponse.status,
+      headers: newHeaders
+    });
+    await cache.put(cacheKey, cachedResponse);
+  }
+
+  return response;
 }
 
-// Get data for last 30 days
+// Get data for last 30 days (with caching)
 async function getData30d(
   env: Env,
   url: URL,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
-  return await getDataForTimeRange(env, url, corsHeaders, 720);
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+  const exchange = url.searchParams.get('exchange') || 'all';
+
+  if (!symbol) {
+    return Response.json(
+      { success: false, error: 'Missing required parameter: symbol' } as ApiResponse,
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // OPTIMIZATION: Cache responses for 10 minutes to reduce DB load
+  const cacheKey = new Request(`https://cache/data/30d/${symbol}/${exchange}`, { method: 'GET' });
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (response) {
+    const newHeaders = new Headers(response.headers);
+    Object.entries(corsHeaders).forEach(([key, value]) => newHeaders.set(key, value));
+    newHeaders.set('X-Cache', 'HIT');
+    return new Response(response.body, { status: response.status, headers: newHeaders });
+  }
+
+  // Cache miss - fetch fresh data
+  response = await getDataForTimeRange(env, url, corsHeaders, 720);
+
+  // Cache successful responses for 10 minutes (600 seconds)
+  if (response.ok) {
+    const cacheResponse = response.clone();
+    const newHeaders = new Headers(cacheResponse.headers);
+    newHeaders.set('Cache-Control', 'public, max-age=600');
+    const cachedResponse = new Response(cacheResponse.body, {
+      status: cacheResponse.status,
+      headers: newHeaders
+    });
+    await cache.put(cacheKey, cachedResponse);
+  }
+
+  return response;
 }
 
 // Compare a token across all exchanges

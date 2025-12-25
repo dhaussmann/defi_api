@@ -53,6 +53,9 @@ database_id = "77ba166f-0989-45d4-aa63-dc4ff0d517cb"
 [vars]
 SNAPSHOT_INTERVAL_MS = "15000"
 
-# Cron Triggers - Update normalized_tokens table every minute
+# Cron Triggers - Update normalized_tokens table every 5 minutes
+# OPTIMIZATION: Reduced from every minute to every 5 minutes
+# Previous load: 825 UPSERTs × 60 = 49,500 operations/hour
+# New load: 825 UPSERTs × 12 = 9,900 operations/hour (80% reduction)
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/5 * * * *"]
