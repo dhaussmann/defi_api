@@ -680,17 +680,17 @@ GET /api/normalized-data
 | `exchange` | string | Nein | `all` | Filtert nach spezifischer Börse |
 | `from` | number | Nein | `-7 days` | Start-Timestamp (Sekunden oder Millisekunden) |
 | `to` | number | Nein | `now` | End-Timestamp (Sekunden oder Millisekunden) |
-| `limit` | number | Nein | `1000` | Maximale Anzahl Ergebnisse (1-10000) |
-| `interval` | string | Nein | `auto` | Zeitauflösung: `auto`, `raw`, `15m`, `1h`, `4h`, `1d` |
+| `limit` | number | Nein | `168` | Maximale Anzahl Ergebnisse (1-10000), Default: 168 = 7 Tage à 24 Stunden |
+| `interval` | string | Nein | `1h` | Zeitauflösung: `1h` (empfohlen), `raw`, `15m`, `4h`, `1d`, `auto` |
 
 **Interval-Modi:**
 
+- **`1h`** (DEFAULT) - Stündliche Aggregation - empfohlen für die meisten Anwendungsfälle
+- `15m` - 15-Minuten-Aggregation für granularere Analyse
+- `4h` - 4-Stunden-Aggregation für Swing-Trading
+- `1d` - Tägliche Aggregation für langfristige Trends
+- `raw` - 15-Sekunden-Snapshots (nur letzte 7 Tage, sehr große Datenmengen)
 - `auto` - Wählt automatisch beste Auflösung basierend auf Zeitraum
-  - ≤1 Tag → raw (15s-Snapshots)
-  - 1-7 Tage → 1h Aggregation
-  - >7 Tage → 1h Aggregation (kombiniert historical + recent)
-- `raw` - 15-Sekunden-Snapshots (nur letzte 7 Tage verfügbar)
-- `15m`, `1h`, `4h`, `1d` - Aggregierte Intervalle
 
 **Beispiele:**
 
@@ -709,8 +709,14 @@ FROM=$(date -u -v-7d +%s)
 TO=$(date -u +%s)
 curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=BTC&from=${FROM}&to=${TO}&interval=1h"
 
-# Auto-Mode (beste Auflösung automatisch)
+# Ohne Parameter (verwendet Defaults: interval=1h, limit=168)
 curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=BTC"
+
+# HYPE Funding Rates - letzte 7 Tage (168 Stunden)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=HYPE"
+
+# HYPE nur auf Hyperliquid
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=HYPE&exchange=hyperliquid"
 ```
 
 **Response:**

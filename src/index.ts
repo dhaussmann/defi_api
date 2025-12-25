@@ -1099,8 +1099,8 @@ async function getNormalizedData(
     const exchange = url.searchParams.get('exchange');
     const from = url.searchParams.get('from');
     const to = url.searchParams.get('to');
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '1000'), 10000);
-    const interval = url.searchParams.get('interval') || 'auto'; // auto, raw, 15m, 1h, 4h, 1d
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '168'), 10000); // Default: 168 hours = 7 days
+    const interval = url.searchParams.get('interval') || '1h'; // Default: hourly aggregation
 
     if (!symbol) {
       return Response.json(
