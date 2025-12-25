@@ -41,6 +41,9 @@ https://defiapi.cloudflareone-demo-account.workers.dev
 | `/api/tokens` | GET | Liste aller verfügbaren Token (normalisiert) |
 | `/api/compare?token=BTC` | GET | Token-Vergleich über alle Börsen |
 | **`/api/normalized-data?symbol=BTC&interval=1h`** | **GET** | **🆕 Vereinheitlichter Endpunkt für alle Metriken** |
+| **`/api/data/24h?symbol=HYPE`** | **GET** | **🆕 24 Stunden Daten (stündlich)** |
+| **`/api/data/7d?symbol=HYPE`** | **GET** | **🆕 7 Tage Daten (stündlich)** |
+| **`/api/data/30d?symbol=HYPE`** | **GET** | **🆕 30 Tage Daten (stündlich)** |
 | `/api/funding-history?symbol=BTC` | GET | Historische Funding Rates (ab Jan 2025) |
 | `/api/market-history?symbol=BTC` | GET | Historische Market-Daten (Preise, Volume, OI, Funding) |
 | `/api/volatility?symbol=BTC&interval=1h` | GET | Echtzeit-Volatilität (letzte 7 Tage) |
@@ -368,7 +371,73 @@ Die API erkennt automatisch folgende Varianten:
 
 ---
 
-### 2. Historische Funding Rates
+### 2. Zeitbasierte Schnell-Endpunkte (24h, 7d, 30d)
+
+**🆕 EMPFOHLEN für schnellen Zugriff:** Vorkonfigurierte Endpunkte für häufige Zeiträume mit stündlicher Aggregation.
+
+```bash
+GET /api/data/24h?symbol=<SYMBOL>
+GET /api/data/7d?symbol=<SYMBOL>
+GET /api/data/30d?symbol=<SYMBOL>
+```
+
+**Query-Parameter:**
+
+| Parameter | Typ | Pflicht | Beschreibung |
+|-----------|-----|---------|--------------|
+| `symbol` | string | **Ja** | Normalisiertes Token-Symbol (z.B. `BTC`, `ETH`, `HYPE`) |
+| `exchange` | string | Nein | Optional: Filtert nach spezifischer Börse |
+
+**Beispiele:**
+
+```bash
+# HYPE letzte 24 Stunden (24 Datenpunkte à 1 Stunde)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/data/24h?symbol=HYPE"
+
+# BTC letzte 7 Tage (168 Datenpunkte à 1 Stunde)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/data/7d?symbol=BTC"
+
+# ETH letzte 30 Tage (720 Datenpunkte à 1 Stunde)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/data/30d?symbol=ETH"
+
+# HYPE nur auf Hyperliquid (letzte 7 Tage)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/data/7d?symbol=HYPE&exchange=hyperliquid"
+
+# Mehrere Symbole parallel abfragen
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/data/24h?symbol=BTC" &
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/data/24h?symbol=ETH" &
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/data/24h?symbol=HYPE" &
+wait
+```
+
+**Response:**
+
+Identisch mit `/api/normalized-data` - siehe Abschnitt 5 für Details.
+
+**Vorkonfigurierte Werte:**
+
+| Endpunkt | Zeitraum | Datenpunkte | Interval | Limit |
+|----------|----------|-------------|----------|-------|
+| `/api/data/24h` | Letzte 24 Stunden | 24 | 1h | 24 |
+| `/api/data/7d` | Letzte 7 Tage | 168 | 1h | 168 |
+| `/api/data/30d` | Letzte 30 Tage | 720 | 1h | 720 |
+
+**Vorteile:**
+
+✅ **Einfachste Verwendung** - Nur Symbol erforderlich
+✅ **Optimiert für häufige Use Cases** - 24h, 7d, 30d Analysen
+✅ **Konsistente stündliche Daten** - Immer 1h Aggregation
+✅ **Keine Parameter-Verwirrung** - Vorkonfiguriert und getestet
+
+**Anwendungsfälle:**
+
+- **24h**: Intraday-Trading, aktuelle Funding Rate Trends
+- **7d**: Wochenanalyse, mittelfristige Strategien
+- **30d**: Monatsanalyse, langfristige Trends
+
+---
+
+### 3. Historische Funding Rates
 
 **NEU:** Abfrage historischer Funding Rate Daten (ab 1. Januar 2025).
 
@@ -457,7 +526,7 @@ curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/funding-history
 
 ---
 
-### 3. Historische Market-Daten (Alle Metriken)
+### 4. Historische Market-Daten (Alle Metriken)
 
 **NEU:** Abfrage aggregierter historischer Market-Daten mit allen Metriken (Daten ≥ 7 Tage alt).
 
@@ -575,7 +644,7 @@ curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/market-history?
 
 ---
 
-### 4. Echtzeit-Volatilität
+### 5. Echtzeit-Volatilität
 
 **NEU:** Berechnet Volatilität aus Live-Daten der letzten 7 Tage.
 
@@ -664,7 +733,7 @@ curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/volatility?inte
 
 ---
 
-### 5. Normalisierte Daten (Vereinheitlichter Endpunkt)
+### 6. Normalisierte Daten (Vereinheitlichter Endpunkt)
 
 **🆕 EMPFOHLEN:** Universeller Endpunkt für alle normalisierten Market-Daten mit flexibler Zeitauflösung.
 
@@ -822,7 +891,7 @@ curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data
 
 ---
 
-### 6. Neueste Market Stats
+### 7. Neueste Market Stats
 
 Liefert die neuesten Daten für jedes Symbol (ein Datensatz pro Symbol).
 
@@ -886,7 +955,7 @@ curl "https://defiapi.workers.dev/api/latest?exchange=hyperliquid&symbol=BTC"
 }
 ```
 
-### 7. Historische Market Stats
+### 8. Historische Market Stats
 
 Liefert historische Daten mit Filtermöglichkeiten.
 
@@ -943,7 +1012,7 @@ curl "https://defiapi.workers.dev/api/stats?exchange=lighter&symbol=ETH&limit=20
 }
 ```
 
-### 8. Tracker Status (Datenbank)
+### 9. Tracker Status (Datenbank)
 
 Zeigt den Status aller Tracker aus der Datenbank.
 

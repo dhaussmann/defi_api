@@ -213,6 +213,12 @@ async function handleApiRoute(
       return await getVolatility(env, url, corsHeaders);
     case '/api/normalized-data':
       return await getNormalizedData(env, url, corsHeaders);
+    case '/api/data/24h':
+      return await getData24h(env, url, corsHeaders);
+    case '/api/data/7d':
+      return await getData7d(env, url, corsHeaders);
+    case '/api/data/30d':
+      return await getData30d(env, url, corsHeaders);
     default:
       return new Response('API endpoint not found', {
         status: 404,
@@ -1427,6 +1433,64 @@ async function getNormalizedData(
       { status: 500, headers: corsHeaders }
     );
   }
+}
+
+// Helper function for time-based data endpoints
+async function getDataForTimeRange(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>,
+  hours: number
+): Promise<Response> {
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+
+  if (!symbol) {
+    return Response.json(
+      {
+        success: false,
+        error: 'Missing required parameter: symbol',
+      } as ApiResponse,
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // Create new URL with time range parameters
+  const newUrl = new URL(url.toString());
+  newUrl.searchParams.set('interval', '1h');
+  newUrl.searchParams.set('limit', hours.toString());
+
+  // Remove any existing from/to to use default (last N hours)
+  newUrl.searchParams.delete('from');
+  newUrl.searchParams.delete('to');
+
+  return await getNormalizedData(env, newUrl, corsHeaders);
+}
+
+// Get data for last 24 hours
+async function getData24h(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  return await getDataForTimeRange(env, url, corsHeaders, 24);
+}
+
+// Get data for last 7 days
+async function getData7d(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  return await getDataForTimeRange(env, url, corsHeaders, 168);
+}
+
+// Get data for last 30 days
+async function getData30d(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  return await getDataForTimeRange(env, url, corsHeaders, 720);
 }
 
 // Compare a token across all exchanges
