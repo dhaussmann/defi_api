@@ -1222,13 +1222,14 @@ async function getNormalizedData(
         );
       }
 
+      // If exchange is specified, group by exchange; otherwise aggregate all exchanges together
       let aggregatedQuery = `
         WITH time_buckets AS (
           SELECT
-            exchange,
-            symbol as original_symbol,
+            ${exchange ? 'exchange,' : "'all' as exchange,"}
+            ${exchange ? 'symbol as original_symbol,' : 'MAX(symbol) as original_symbol,'}
             UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) as normalized_symbol,
-            (created_at / ?) * ? as bucket_time,
+            (created_at - (created_at % ?)) as bucket_time,
             MIN(CAST(mark_price AS REAL)) as min_price,
             MAX(CAST(mark_price AS REAL)) as max_price,
             AVG(CAST(mark_price AS REAL)) as mark_price,
@@ -1247,7 +1248,7 @@ async function getNormalizedData(
           WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) = ?
       `;
 
-      const aggregatedParams: any[] = [bucketSize, bucketSize, symbol];
+      const aggregatedParams: any[] = [bucketSize, symbol];
 
       if (exchange) {
         aggregatedQuery += ` AND exchange = ?`;
@@ -1258,7 +1259,7 @@ async function getNormalizedData(
       aggregatedParams.push(Math.max(fromTimestamp, sevenDaysAgo), toTimestamp);
 
       aggregatedQuery += `
-          GROUP BY exchange, original_symbol, normalized_symbol, bucket_time
+          GROUP BY ${exchange ? 'exchange, original_symbol,' : ''} normalized_symbol, bucket_time
         )
         SELECT *,
           CASE
@@ -1413,9 +1414,11 @@ async function getDataForTimeRange(
   newUrl.searchParams.set('interval', '1h');
   newUrl.searchParams.set('limit', hours.toString());
 
-  // Remove any existing from/to to use default (last N hours)
-  newUrl.searchParams.delete('from');
-  newUrl.searchParams.delete('to');
+  // Set time range to last N hours from now
+  const now = Math.floor(Date.now() / 1000);
+  const fromTime = now - (hours * 60 * 60);
+  newUrl.searchParams.set('from', fromTime.toString());
+  newUrl.searchParams.set('to', now.toString());
 
   return await getNormalizedData(env, newUrl, corsHeaders);
 }
