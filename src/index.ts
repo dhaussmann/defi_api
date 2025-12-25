@@ -211,6 +211,8 @@ async function handleApiRoute(
       return await getMarketHistory(env, url, corsHeaders);
     case '/api/volatility':
       return await getVolatility(env, url, corsHeaders);
+    case '/api/normalized-data':
+      return await getNormalizedData(env, url, corsHeaders);
     default:
       return new Response('API endpoint not found', {
         status: 404,
@@ -1080,6 +1082,347 @@ async function getVolatility(
       {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to get volatility',
+      } as ApiResponse,
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
+// Get normalized data with flexible time range and aggregation
+async function getNormalizedData(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const symbol = url.searchParams.get('symbol')?.toUpperCase();
+    const exchange = url.searchParams.get('exchange');
+    const from = url.searchParams.get('from');
+    const to = url.searchParams.get('to');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '1000'), 10000);
+    const interval = url.searchParams.get('interval') || 'auto'; // auto, raw, 15m, 1h, 4h, 1d
+
+    if (!symbol) {
+      return Response.json(
+        {
+          success: false,
+          error: 'Missing required parameter: symbol',
+        } as ApiResponse,
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const sevenDaysAgo = nowSeconds - (7 * 24 * 60 * 60);
+
+    let fromTimestamp: number;
+    let toTimestamp: number;
+
+    // Parse timestamps (accept both seconds and milliseconds)
+    if (from) {
+      fromTimestamp = from.length > 10 ? Math.floor(parseInt(from) / 1000) : parseInt(from);
+    } else {
+      fromTimestamp = sevenDaysAgo;
+    }
+
+    if (to) {
+      toTimestamp = to.length > 10 ? Math.floor(parseInt(to) / 1000) : parseInt(to);
+    } else {
+      toTimestamp = nowSeconds;
+    }
+
+    // Determine data source based on time range
+    const needsHistoricalData = fromTimestamp < sevenDaysAgo;
+    const needsRecentData = toTimestamp > sevenDaysAgo;
+
+    let allData: any[] = [];
+
+    // Query 1: Historical aggregated data (market_history) for data >= 7 days old
+    if (needsHistoricalData) {
+      let historyQuery = `
+        SELECT
+          exchange,
+          symbol as original_symbol,
+          normalized_symbol,
+          avg_mark_price as mark_price,
+          avg_index_price as index_price,
+          min_price,
+          max_price,
+          price_volatility as volatility,
+          volume_base,
+          volume_quote,
+          avg_open_interest as open_interest,
+          avg_open_interest_usd as open_interest_usd,
+          max_open_interest_usd,
+          avg_funding_rate as funding_rate,
+          avg_funding_rate_annual as funding_rate_annual,
+          min_funding_rate,
+          max_funding_rate,
+          hour_timestamp as timestamp,
+          sample_count,
+          datetime(hour_timestamp, 'unixepoch') as timestamp_iso
+        FROM market_history
+        WHERE normalized_symbol = ?
+      `;
+
+      const historyParams: any[] = [symbol];
+
+      if (exchange) {
+        historyQuery += ` AND exchange = ?`;
+        historyParams.push(exchange);
+      }
+
+      historyQuery += ` AND hour_timestamp >= ? AND hour_timestamp <= ?`;
+      historyParams.push(fromTimestamp, Math.min(toTimestamp, sevenDaysAgo));
+
+      historyQuery += ` ORDER BY hour_timestamp DESC LIMIT ?`;
+      historyParams.push(limit);
+
+      const historyResult = await env.DB.prepare(historyQuery).bind(...historyParams).all();
+
+      if (historyResult.success && historyResult.results) {
+        allData = allData.concat(
+          historyResult.results.map((row: any) => ({
+            ...row,
+            data_source: 'aggregated',
+            interval: '1h',
+          }))
+        );
+      }
+    }
+
+    // Query 2: Recent raw data (market_stats) for data < 7 days old
+    if (needsRecentData && interval === 'raw') {
+      let statsQuery = `
+        SELECT
+          exchange,
+          symbol as original_symbol,
+          UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) as normalized_symbol,
+          CAST(mark_price AS REAL) as mark_price,
+          CAST(index_price AS REAL) as index_price,
+          CAST(mark_price AS REAL) as min_price,
+          CAST(mark_price AS REAL) as max_price,
+          0 as volatility,
+          daily_base_token_volume as volume_base,
+          daily_quote_token_volume as volume_quote,
+          CAST(open_interest AS REAL) as open_interest,
+          CAST(open_interest AS REAL) * CAST(mark_price AS REAL) as open_interest_usd,
+          CAST(funding_rate AS REAL) as funding_rate,
+          CAST(funding_rate AS REAL) * 100 * 3 * 365 as funding_rate_annual,
+          created_at as timestamp,
+          1 as sample_count,
+          datetime(created_at, 'unixepoch') as timestamp_iso
+        FROM market_stats
+        WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) = ?
+      `;
+
+      const statsParams: any[] = [symbol];
+
+      if (exchange) {
+        statsQuery += ` AND exchange = ?`;
+        statsParams.push(exchange);
+      }
+
+      statsQuery += ` AND created_at >= ? AND created_at <= ?`;
+      statsParams.push(Math.max(fromTimestamp, sevenDaysAgo), toTimestamp);
+
+      statsQuery += ` ORDER BY created_at DESC LIMIT ?`;
+      statsParams.push(limit);
+
+      const statsResult = await env.DB.prepare(statsQuery).bind(...statsParams).all();
+
+      if (statsResult.success && statsResult.results) {
+        allData = allData.concat(
+          statsResult.results.map((row: any) => ({
+            ...row,
+            data_source: 'raw',
+            interval: '15s',
+          }))
+        );
+      }
+    }
+
+    // Query 3: Recent aggregated data (calculated from market_stats) for intervals
+    if (needsRecentData && interval !== 'raw' && interval !== 'auto') {
+      const intervalSeconds: { [key: string]: number } = {
+        '15m': 15 * 60,
+        '1h': 60 * 60,
+        '4h': 4 * 60 * 60,
+        '1d': 24 * 60 * 60,
+      };
+
+      const bucketSize = intervalSeconds[interval];
+      if (!bucketSize) {
+        return Response.json(
+          {
+            success: false,
+            error: 'Invalid interval. Use: raw, 15m, 1h, 4h, 1d',
+          } as ApiResponse,
+          { status: 400, headers: corsHeaders }
+        );
+      }
+
+      let aggregatedQuery = `
+        WITH time_buckets AS (
+          SELECT
+            exchange,
+            symbol as original_symbol,
+            UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) as normalized_symbol,
+            (created_at / ?) * ? as bucket_time,
+            MIN(CAST(mark_price AS REAL)) as min_price,
+            MAX(CAST(mark_price AS REAL)) as max_price,
+            AVG(CAST(mark_price AS REAL)) as mark_price,
+            AVG(CAST(index_price AS REAL)) as index_price,
+            SUM(daily_base_token_volume) as volume_base,
+            SUM(daily_quote_token_volume) as volume_quote,
+            AVG(CAST(open_interest AS REAL)) as open_interest,
+            AVG(CAST(open_interest AS REAL) * CAST(mark_price AS REAL)) as open_interest_usd,
+            MAX(CAST(open_interest AS REAL) * CAST(mark_price AS REAL)) as max_open_interest_usd,
+            AVG(CAST(funding_rate AS REAL)) as funding_rate,
+            AVG(CAST(funding_rate AS REAL) * 100 * 3 * 365) as funding_rate_annual,
+            MIN(CAST(funding_rate AS REAL)) as min_funding_rate,
+            MAX(CAST(funding_rate AS REAL)) as max_funding_rate,
+            COUNT(*) as sample_count
+          FROM market_stats
+          WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) = ?
+      `;
+
+      const aggregatedParams: any[] = [bucketSize, bucketSize, symbol];
+
+      if (exchange) {
+        aggregatedQuery += ` AND exchange = ?`;
+        aggregatedParams.push(exchange);
+      }
+
+      aggregatedQuery += ` AND created_at >= ? AND created_at <= ?`;
+      aggregatedParams.push(Math.max(fromTimestamp, sevenDaysAgo), toTimestamp);
+
+      aggregatedQuery += `
+          GROUP BY exchange, original_symbol, normalized_symbol, bucket_time
+        )
+        SELECT *,
+          CASE
+            WHEN mark_price > 0
+            THEN ((max_price - min_price) / mark_price * 100)
+            ELSE 0
+          END as volatility,
+          bucket_time as timestamp,
+          datetime(bucket_time, 'unixepoch') as timestamp_iso
+        FROM time_buckets
+        ORDER BY bucket_time DESC
+        LIMIT ?
+      `;
+
+      aggregatedParams.push(limit);
+
+      const aggregatedResult = await env.DB.prepare(aggregatedQuery).bind(...aggregatedParams).all();
+
+      if (aggregatedResult.success && aggregatedResult.results) {
+        allData = allData.concat(
+          aggregatedResult.results.map((row: any) => ({
+            ...row,
+            data_source: 'calculated',
+            interval: interval,
+          }))
+        );
+      }
+    }
+
+    // Auto mode: choose best data source
+    if (interval === 'auto') {
+      const timeRangeDays = (toTimestamp - fromTimestamp) / (24 * 60 * 60);
+
+      if (timeRangeDays <= 1) {
+        // For 1 day or less, use raw data
+        return await getNormalizedData(env, new URL(url.toString().replace('interval=auto', 'interval=raw')), corsHeaders);
+      } else if (timeRangeDays <= 7) {
+        // For 1-7 days, use 1h aggregation
+        return await getNormalizedData(env, new URL(url.toString().replace('interval=auto', 'interval=1h')), corsHeaders);
+      } else {
+        // For > 7 days, combine historical (1h) and recent (1h)
+        return await getNormalizedData(env, new URL(url.toString().replace('interval=auto', 'interval=1h')), corsHeaders);
+      }
+    }
+
+    // Sort all data by timestamp (descending)
+    allData.sort((a, b) => b.timestamp - a.timestamp);
+
+    // Limit results
+    if (allData.length > limit) {
+      allData = allData.slice(0, limit);
+    }
+
+    if (allData.length === 0) {
+      return Response.json(
+        {
+          success: false,
+          error: `No data found for symbol "${symbol}" in the specified time range`,
+        } as ApiResponse,
+        { status: 404, headers: corsHeaders }
+      );
+    }
+
+    // Calculate statistics
+    const prices = allData.map(d => d.mark_price).filter(p => p > 0);
+    const volatilities = allData.map(d => d.volatility).filter(v => v !== null && v !== undefined);
+    const fundingRates = allData.map(d => d.funding_rate_annual).filter(r => r !== null && r !== undefined);
+    const openInterests = allData.map(d => d.open_interest_usd).filter(oi => oi > 0);
+
+    const stats = {
+      count: allData.length,
+      price: {
+        current: prices[0] || 0,
+        avg: prices.reduce((sum, p) => sum + p, 0) / prices.length || 0,
+        min: Math.min(...prices) || 0,
+        max: Math.max(...prices) || 0,
+      },
+      volatility: volatilities.length > 0 ? {
+        current: volatilities[0] || 0,
+        avg: volatilities.reduce((sum, v) => sum + v, 0) / volatilities.length || 0,
+        min: Math.min(...volatilities) || 0,
+        max: Math.max(...volatilities) || 0,
+      } : null,
+      funding_rate: fundingRates.length > 0 ? {
+        current_apr: fundingRates[0] || 0,
+        avg_apr: fundingRates.reduce((sum, r) => sum + r, 0) / fundingRates.length || 0,
+        min_apr: Math.min(...fundingRates) || 0,
+        max_apr: Math.max(...fundingRates) || 0,
+      } : null,
+      open_interest: openInterests.length > 0 ? {
+        current_usd: openInterests[0] || 0,
+        avg_usd: openInterests.reduce((sum, oi) => sum + oi, 0) / openInterests.length || 0,
+        min_usd: Math.min(...openInterests) || 0,
+        max_usd: Math.max(...openInterests) || 0,
+      } : null,
+      time_range: {
+        from: allData[allData.length - 1]?.timestamp_iso || null,
+        to: allData[0]?.timestamp_iso || null,
+        from_timestamp: allData[allData.length - 1]?.timestamp || null,
+        to_timestamp: allData[0]?.timestamp || null,
+      },
+    };
+
+    return Response.json(
+      {
+        success: true,
+        data: allData,
+        stats,
+        meta: {
+          symbol,
+          exchange: exchange || 'all',
+          interval: interval,
+          limit,
+          data_sources: [...new Set(allData.map(d => d.data_source))],
+        },
+      } as ApiResponse,
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (error) {
+    console.error('[API] Error in getNormalizedData:', error);
+    return Response.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get normalized data',
       } as ApiResponse,
       { status: 500, headers: corsHeaders }
     );

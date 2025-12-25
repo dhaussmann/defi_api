@@ -40,6 +40,7 @@ https://defiapi.cloudflareone-demo-account.workers.dev
 | `/api/trackers` | GET | Status aller Exchange-Tracker |
 | `/api/tokens` | GET | Liste aller verfügbaren Token (normalisiert) |
 | `/api/compare?token=BTC` | GET | Token-Vergleich über alle Börsen |
+| **`/api/normalized-data?symbol=BTC&interval=1h`** | **GET** | **🆕 Vereinheitlichter Endpunkt für alle Metriken** |
 | `/api/funding-history?symbol=BTC` | GET | Historische Funding Rates (ab Jan 2025) |
 | `/api/market-history?symbol=BTC` | GET | Historische Market-Daten (Preise, Volume, OI, Funding) |
 | `/api/volatility?symbol=BTC&interval=1h` | GET | Echtzeit-Volatilität (letzte 7 Tage) |
@@ -663,7 +664,159 @@ curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/volatility?inte
 
 ---
 
-### 5. Neueste Market Stats
+### 5. Normalisierte Daten (Vereinheitlichter Endpunkt)
+
+**🆕 EMPFOHLEN:** Universeller Endpunkt für alle normalisierten Market-Daten mit flexibler Zeitauflösung.
+
+```bash
+GET /api/normalized-data
+```
+
+**Query-Parameter:**
+
+| Parameter | Typ | Pflicht | Default | Beschreibung |
+|-----------|-----|---------|---------|--------------|
+| `symbol` | string | **Ja** | - | Normalisiertes Token-Symbol (z.B. `BTC`, `ETH`, `SOL`) |
+| `exchange` | string | Nein | `all` | Filtert nach spezifischer Börse |
+| `from` | number | Nein | `-7 days` | Start-Timestamp (Sekunden oder Millisekunden) |
+| `to` | number | Nein | `now` | End-Timestamp (Sekunden oder Millisekunden) |
+| `limit` | number | Nein | `1000` | Maximale Anzahl Ergebnisse (1-10000) |
+| `interval` | string | Nein | `auto` | Zeitauflösung: `auto`, `raw`, `15m`, `1h`, `4h`, `1d` |
+
+**Interval-Modi:**
+
+- `auto` - Wählt automatisch beste Auflösung basierend auf Zeitraum
+  - ≤1 Tag → raw (15s-Snapshots)
+  - 1-7 Tage → 1h Aggregation
+  - >7 Tage → 1h Aggregation (kombiniert historical + recent)
+- `raw` - 15-Sekunden-Snapshots (nur letzte 7 Tage verfügbar)
+- `15m`, `1h`, `4h`, `1d` - Aggregierte Intervalle
+
+**Beispiele:**
+
+```bash
+# BTC letzte 24 Stunden (stündlich aggregiert)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=BTC&interval=1h&limit=24"
+
+# ETH letzte 7 Tage (täglich aggregiert)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=ETH&interval=1d&limit=7"
+
+# SOL auf Hyperliquid (4-Stunden-Intervalle)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=SOL&exchange=hyperliquid&interval=4h&limit=42"
+
+# BTC spezifischer Zeitraum (letzte Woche)
+FROM=$(date -u -v-7d +%s)
+TO=$(date -u +%s)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=BTC&from=${FROM}&to=${TO}&interval=1h"
+
+# Auto-Mode (beste Auflösung automatisch)
+curl "https://defiapi.cloudflareone-demo-account.workers.dev/api/normalized-data?symbol=BTC"
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "exchange": "hyperliquid",
+      "original_symbol": "BTC",
+      "normalized_symbol": "BTC",
+      "mark_price": 87825.0,
+      "index_price": 87849.0,
+      "min_price": 87800.0,
+      "max_price": 87850.0,
+      "volatility": 0.057,
+      "volume_base": 1390744561.78,
+      "volume_quote": 1390744561.78,
+      "open_interest": 22938.23418,
+      "open_interest_usd": 2014550416.86,
+      "max_open_interest_usd": 2015000000.0,
+      "funding_rate": 0.0000125,
+      "funding_rate_annual": 1.36875,
+      "min_funding_rate": 0.0000100,
+      "max_funding_rate": 0.0000150,
+      "sample_count": 240,
+      "timestamp": 1766650259,
+      "timestamp_iso": "2025-12-25 08:10:59",
+      "data_source": "calculated",
+      "interval": "1h"
+    }
+    // ... weitere Datenpunkte
+  ],
+  "stats": {
+    "count": 24,
+    "price": {
+      "current": 87825.0,
+      "avg": 87829.69,
+      "min": 87780.27,
+      "max": 87850.6
+    },
+    "volatility": {
+      "current": 0.057,
+      "avg": 0.045,
+      "min": 0.012,
+      "max": 0.082
+    },
+    "funding_rate": {
+      "current_apr": 1.36875,
+      "avg_apr": 35.18,
+      "min_apr": 1.36875,
+      "max_apr": 131.4
+    },
+    "open_interest": {
+      "current_usd": 2014550416.86,
+      "avg_usd": 5465783217305.68,
+      "min_usd": 2014550416.86,
+      "max_usd": 21101755263257.22
+    },
+    "time_range": {
+      "from": "2025-12-24 08:10:59",
+      "to": "2025-12-25 08:10:59",
+      "from_timestamp": 1766563859,
+      "to_timestamp": 1766650259
+    }
+  },
+  "meta": {
+    "symbol": "BTC",
+    "exchange": "hyperliquid",
+    "interval": "1h",
+    "limit": 24,
+    "data_sources": [
+      "calculated"
+    ]
+  }
+}
+```
+
+**Datenquellen (data_source):**
+
+- `calculated` - Berechnet aus `market_stats` (letzte 7 Tage, On-Demand-Aggregation)
+- `aggregated` - Aus `market_history` (>7 Tage alt, vorberechnete Stunden-Aggregation)
+- `raw` - Direkt aus `market_stats` (15-Sekunden-Snapshots)
+
+**Vorteile dieses Endpoints:**
+
+✅ **Ein Endpunkt für alles** - Alle Metriken in einer Abfrage
+✅ **Flexible Zeitauflösung** - Von Sekunden bis Tage
+✅ **Automatische Optimierung** - Auto-Mode wählt beste Auflösung
+✅ **Kombinierte Datenquellen** - Historical + Recent nahtlos vereint
+✅ **Umfassende Statistiken** - Automatische Berechnung von Min/Max/Avg
+✅ **Alle 7 Exchanges** - Vollständige Abdeckung
+
+**Anwendungsfälle:**
+
+- **Trading Dashboards:** Echtzeit-Preise mit 15s-Auflösung
+- **Technische Analyse:** Stunden-/Tages-Charts mit OHLC-Daten
+- **Volatilitäts-Monitoring:** Min/Max-Preise pro Intervall
+- **Funding Rate Trends:** APR-Entwicklung über Zeit
+- **Open Interest Tracking:** OI-Veränderungen pro Stunde/Tag
+- **Cross-Exchange-Vergleiche:** Multi-Exchange-Daten in einem Call
+
+---
+
+### 6. Neueste Market Stats
 
 Liefert die neuesten Daten für jedes Symbol (ein Datensatz pro Symbol).
 
@@ -727,7 +880,7 @@ curl "https://defiapi.workers.dev/api/latest?exchange=hyperliquid&symbol=BTC"
 }
 ```
 
-### 6. Historische Market Stats
+### 7. Historische Market Stats
 
 Liefert historische Daten mit Filtermöglichkeiten.
 
@@ -784,7 +937,7 @@ curl "https://defiapi.workers.dev/api/stats?exchange=lighter&symbol=ETH&limit=20
 }
 ```
 
-### 7. Tracker Status (Datenbank)
+### 8. Tracker Status (Datenbank)
 
 Zeigt den Status aller Tracker aus der Datenbank.
 
