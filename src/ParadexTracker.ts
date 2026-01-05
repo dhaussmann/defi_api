@@ -8,73 +8,57 @@ import {
 } from './types';
 
 /**
- * ParadexTracker - Durable Object für persistente WebSocket-Verbindung
+ * ParadexTracker - Durable Object für Paradex Exchange WebSocket-Verbindung
  *
- * Dieser Tracker verwaltet eine dauerhafte WebSocket-Verbindung zum Paradex Exchange
- * und speichert Market-Statistiken in regelmäßigen Snapshots in die D1 Datenbank.
- *
- * Hauptfunktionen:
- * - WebSocket-Verbindung mit automatischer Reconnect-Logik
- * - Buffering von Market-Daten im Speicher
+ * Vereinfachte Implementierung mit stabilem WebSocket-Handling:
+ * - WebSocket-Verbindung zu markets_summary Channel
  * - Regelmäßige Snapshots (alle 15 Sekunden) in die Datenbank
- * - Caching der verfügbaren Markets (60 Minuten)
- * - Keep-Alive via Ping/Pong (JSON-RPC 2.0)
+ * - Automatisches Reconnect bei Verbindungsabbruch
+ * - Kein komplexes Ping/Pong-Handling - einfaches Reconnect alle 45 Sekunden
  */
 export class ParadexTracker implements DurableObject {
-  // Durable Object State und Environment
   private state: DurableObjectState;
   private env: Env;
 
-  // WebSocket-Verbindung und Timer
+  // WebSocket und Timer
   private ws: WebSocket | null = null;
-  private reconnectTimeout: number | null = null;
   private snapshotInterval: number | null = null;
+  private reconnectInterval: number | null = null;
   private statusCheckInterval: number | null = null;
-  private pingInterval: number | null = null;
-  private marketsFetchInterval: number | null = null;
 
-  // Daten-Buffer und Caches
-  private dataBuffer: Map<string, ParadexMarketData> = new Map(); // Zwischenspeicher für Market-Daten
-  private cachedMarkets: ParadexMarket[] = []; // Cache für verfügbare Markets
-  private lastMarketsFetch: number = 0; // Timestamp des letzten Market-Fetch
+  // Daten-Buffer
+  private dataBuffer: Map<string, ParadexMarketData> = new Map();
+  private cachedMarkets: ParadexMarket[] = [];
+  private lastMarketsFetch: number = 0;
 
-  // Status-Variablen
+  // Status
   private isConnected = false;
-  private reconnectAttempts = 0;
   private messageCount = 0;
-  private messageIdCounter = 1; // JSON-RPC Message ID Counter
+  private messageIdCounter = 1;
 
-  // Konfigurationskonstanten
-  private readonly MAX_RECONNECT_ATTEMPTS = 10; // Maximale Anzahl an Reconnect-Versuchen
-  private readonly RECONNECT_DELAY = 5000; // 5 Sekunden Wartezeit zwischen Reconnects
-  private readonly PING_INTERVAL = 30000; // 30 Sekunden - Ping-Intervall für Keep-Alive
-  private readonly MARKETS_REFRESH_INTERVAL = 3600000; // 60 Minuten - Markets-Cache Laufzeit
+  // Konfiguration
+  private readonly MARKETS_CACHE_MS = 3600000; // 60 Minuten
+  private readonly RECONNECT_INTERVAL_MS = 45000; // 45 Sekunden (vor 60s Paradex timeout)
+  private readonly API_BASE = 'https://api.prod.paradex.trade/v1';
+  private readonly WS_URL = 'wss://ws.api.prod.paradex.trade/v1';
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
   }
 
-  /**
-   * Haupt-Handler für eingehende Requests
-   * Implementiert Auto-Start-Mechanismus und Route-Handling
-   */
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // Auto-Start: Tracker automatisch starten, wenn nicht verbunden (außer bei /stop)
-    // Dies stellt sicher, dass der Tracker bei jedem Request aktiv ist
+    // Auto-Start
     if (path !== '/stop' && !this.isConnected) {
       console.log('[ParadexTracker] Auto-starting tracker');
-      await this.connect().catch((error) => {
+      await this.start().catch((error) => {
         console.error('[ParadexTracker] Auto-start failed:', error);
       });
-      this.startSnapshotTimer();
-      this.startStatusCheck();
     }
 
-    // Route-Handling für verschiedene Befehle
     switch (path) {
       case '/start':
         return this.handleStart();
@@ -89,9 +73,6 @@ export class ParadexTracker implements DurableObject {
     }
   }
 
-  /**
-   * Handler für /start - Startet den Tracker manuell
-   */
   private async handleStart(): Promise<Response> {
     if (this.isConnected) {
       return Response.json({
@@ -102,10 +83,7 @@ export class ParadexTracker implements DurableObject {
     }
 
     try {
-      await this.connect();
-      this.startSnapshotTimer();
-      this.startStatusCheck();
-
+      await this.start();
       return Response.json({
         success: true,
         message: 'WebSocket connection started',
@@ -119,12 +97,8 @@ export class ParadexTracker implements DurableObject {
     }
   }
 
-  /**
-   * Handler für /stop - Stoppt den Tracker
-   */
   private async handleStop(): Promise<Response> {
-    this.disconnect();
-
+    this.stop();
     return Response.json({
       success: true,
       message: 'WebSocket connection stopped',
@@ -132,29 +106,21 @@ export class ParadexTracker implements DurableObject {
     });
   }
 
-  /**
-   * Handler für /status - Gibt aktuellen Status zurück
-   */
   private async handleStatus(): Promise<Response> {
     return Response.json({
       success: true,
       data: {
         connected: this.isConnected,
-        reconnectAttempts: this.reconnectAttempts,
+        messageCount: this.messageCount,
         bufferSize: this.dataBuffer.size,
-        bufferedSymbols: Array.from(this.dataBuffer.keys()),
+        bufferedSymbols: Array.from(this.dataBuffer.keys()).slice(0, 10),
       },
     });
   }
 
-  /**
-   * Handler für /debug - Erweiterte Debug-Informationen
-   * Zeigt zusätzlich verfügbare Markets und WebSocket ReadyState
-   */
   private async handleDebug(): Promise<Response> {
     try {
       const markets = await this.fetchAvailableMarkets();
-
       return Response.json({
         success: true,
         debug: {
@@ -171,51 +137,88 @@ export class ParadexTracker implements DurableObject {
       return Response.json({
         success: false,
         error: error instanceof Error ? error.message : 'Debug failed',
-        debug: {
-          connected: this.isConnected,
-          messageCount: this.messageCount,
-          bufferSize: this.dataBuffer.size,
-          bufferedSymbols: Array.from(this.dataBuffer.keys()).slice(0, 10),
-          wsReadyState: this.ws?.readyState,
-        },
-      });
+      }, { status: 500 });
     }
   }
 
   /**
-   * Stellt WebSocket-Verbindung zum Paradex Exchange her
-   *
-   * Ablauf:
-   * 1. Alte Verbindung schließen (falls vorhanden)
-   * 2. Markets von API abrufen (mit Caching, nur PERP)
-   * 3. WebSocket-Verbindung aufbauen
-   * 4. Event-Handler registrieren
-   * 5. Nach Verbindungsaufbau: Zu markets_summary Channel subscriben
-   * 6. Ping-Interval starten für Keep-Alive
+   * Startet den Tracker
+   */
+  private async start(): Promise<void> {
+    console.log('[ParadexTracker] Starting tracker');
+
+    // WebSocket verbinden
+    await this.connect();
+
+    // Snapshot Timer starten (alle 15 Sekunden)
+    this.startSnapshotTimer();
+
+    // Status Check Timer
+    this.startStatusCheck();
+
+    // Reconnect Timer (alle 45 Sekunden präventiv reconnecten)
+    this.startReconnectTimer();
+
+    await this.updateTrackerStatus('running', null);
+  }
+
+  /**
+   * Stoppt den Tracker
+   */
+  private stop(): void {
+    console.log('[ParadexTracker] Stopping tracker');
+    this.isConnected = false;
+
+    // WebSocket schließen
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+
+    // Alle Timer stoppen
+    if (this.snapshotInterval) {
+      clearInterval(this.snapshotInterval);
+      this.snapshotInterval = null;
+    }
+    if (this.reconnectInterval) {
+      clearInterval(this.reconnectInterval);
+      this.reconnectInterval = null;
+    }
+    if (this.statusCheckInterval) {
+      clearInterval(this.statusCheckInterval);
+      this.statusCheckInterval = null;
+    }
+
+    this.dataBuffer.clear();
+    this.updateTrackerStatus('stopped', null);
+  }
+
+  /**
+   * Baut WebSocket-Verbindung auf
    */
   private async connect(): Promise<void> {
     try {
-      // Alte Verbindung aufräumen
+      console.log('[ParadexTracker] Connecting to WebSocket...');
+
+      // Markets laden
+      const markets = await this.fetchAvailableMarkets();
+      console.log(`[ParadexTracker] Found ${markets.length} PERP markets`);
+
+      // Alte Verbindung schließen
       if (this.ws) {
         this.ws.close();
         this.ws = null;
       }
 
-      // Markets von API holen (verwendet Cache wenn verfügbar, nur PERP)
-      console.log('[ParadexTracker] Fetching available PERP markets...');
-      const markets = await this.fetchAvailableMarkets();
-      console.log(`[ParadexTracker] Found ${markets.length} PERP markets to track`);
+      // Neue WebSocket-Verbindung
+      this.ws = new WebSocket(this.WS_URL);
 
-      // WebSocket-Verbindung zu Paradex erstellen
-      this.ws = new WebSocket('wss://ws.api.prod.paradex.trade/v1');
-
-      // Event Handler: Verbindung aufgebaut
-      this.ws.addEventListener('open', async () => {
+      // Event: Verbindung aufgebaut
+      this.ws.addEventListener('open', () => {
         console.log('[ParadexTracker] WebSocket connected');
         this.isConnected = true;
-        this.reconnectAttempts = 0;
 
-        // Zu markets_summary Channel subscriben (JSON-RPC 2.0)
+        // Subscribe to markets_summary
         const subscribeMsg: ParadexSubscribeMessage = {
           jsonrpc: '2.0',
           method: 'subscribe',
@@ -226,353 +229,185 @@ export class ParadexTracker implements DurableObject {
         };
 
         this.ws?.send(JSON.stringify(subscribeMsg));
-        console.log('[ParadexTracker] Subscribed to markets_summary channel');
+        console.log('[ParadexTracker] Subscribed to markets_summary');
 
-        // Keep-Alive Ping-Mechanismus starten
-        this.startPingInterval();
-
-        // Status in Datenbank aktualisieren
         this.updateTrackerStatus('connected', null);
       });
 
-      // Event Handler: Nachricht empfangen
+      // Event: Nachricht empfangen
       this.ws.addEventListener('message', async (event) => {
         this.messageCount++;
-        // Logging alle 20 Nachrichten um Log-Spam zu vermeiden
-        if (this.messageCount % 20 === 0) {
-          console.log(`[ParadexTracker] Received ${this.messageCount} messages total`);
+        if (this.messageCount % 50 === 0) {
+          console.log(`[ParadexTracker] Received ${this.messageCount} messages`);
         }
         await this.handleMessage(event.data);
       });
 
-      // Event Handler: Verbindung geschlossen
+      // Event: Verbindung geschlossen
       this.ws.addEventListener('close', (event) => {
-        console.log(`[ParadexTracker] WebSocket closed - Code: ${event.code}, Reason: ${event.reason}`);
+        console.log(`[ParadexTracker] WebSocket closed - Code: ${event.code}`);
         this.isConnected = false;
-        // Automatisch Reconnect versuchen
-        this.scheduleReconnect();
+        // Kein explizites Reconnect hier - der reconnectInterval macht das
       });
 
-      // Event Handler: Fehler
+      // Event: Fehler
       this.ws.addEventListener('error', (event) => {
         console.error('[ParadexTracker] WebSocket error:', event);
-        this.updateTrackerStatus('error', 'WebSocket error occurred');
+        this.isConnected = false;
       });
 
     } catch (error) {
-      console.error('[ParadexTracker] Connection failed:', error);
-      this.isConnected = false;
+      console.error('[ParadexTracker] Connect failed:', error);
       throw error;
     }
   }
 
   /**
-   * Trennt WebSocket-Verbindung und räumt alle Timer auf
-   */
-  private disconnect(): void {
-    this.isConnected = false;
-
-    // WebSocket schließen
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
-
-    // Alle Timer aufräumen
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
-    }
-
-    if (this.snapshotInterval) {
-      clearInterval(this.snapshotInterval);
-      this.snapshotInterval = null;
-    }
-
-    if (this.statusCheckInterval) {
-      clearInterval(this.statusCheckInterval);
-      this.statusCheckInterval = null;
-    }
-
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
-
-    if (this.marketsFetchInterval) {
-      clearInterval(this.marketsFetchInterval);
-      this.marketsFetchInterval = null;
-    }
-
-    this.updateTrackerStatus('disconnected', null);
-  }
-
-  /**
-   * Holt verfügbare Markets von der Paradex API mit Caching
-   * Filtert nur PERP-Märkte (asset_kind === 'PERP')
-   *
-   * Cache-Strategie:
-   * - Cache ist 60 Minuten gültig
-   * - Bei Fehler: Verwende alten Cache als Fallback
-   * - Reduziert API-Calls und verbessert Performance
-   */
-  private async fetchAvailableMarkets(): Promise<ParadexMarket[]> {
-    const now = Date.now();
-
-    // Cache verwenden wenn vorhanden und noch nicht abgelaufen
-    if (this.cachedMarkets.length > 0 && (now - this.lastMarketsFetch) < this.MARKETS_REFRESH_INTERVAL) {
-      console.log(`[ParadexTracker] Using cached markets (${this.cachedMarkets.length} PERP markets, cached ${Math.round((now - this.lastMarketsFetch) / 60000)} minutes ago)`);
-      return this.cachedMarkets;
-    }
-
-    try {
-      // Frische Markets von API holen
-      console.log('[ParadexTracker] Fetching fresh markets from API...');
-      const response = await fetch('https://api.prod.paradex.trade/v1/markets', {
-        headers: {
-          'accept': 'application/json',
-          'user-agent': 'Mozilla/5.0 (compatible; ParadexTracker/1.0)',
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch markets: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const allMarkets: ParadexMarket[] = data.results || data;
-
-      // Nur EXAKT "PERP"-Märkte filtern (nicht PERP_OPTION, etc.)
-      const perpMarkets = allMarkets.filter(market => {
-        // Strikter Vergleich: asset_kind muss EXAKT "PERP" sein
-        const assetKind = (market.asset_kind || '').trim();
-        return assetKind === 'PERP';
-      });
-
-      // Debug-Logging: Zeige welche asset_kinds gefunden wurden
-      const assetKinds = new Set(allMarkets.map(m => m.asset_kind));
-      console.log(`[ParadexTracker] Found asset_kinds: ${Array.from(assetKinds).join(', ')}`);
-      console.log(`[ParadexTracker] Fetched ${allMarkets.length} markets from API, filtered to ${perpMarkets.length} PERP markets (excluded: ${allMarkets.length - perpMarkets.length})`);
-
-      // Cache aktualisieren
-      this.cachedMarkets = perpMarkets;
-      this.lastMarketsFetch = now;
-
-      return perpMarkets;
-    } catch (error) {
-      console.error('[ParadexTracker] Failed to fetch markets:', error);
-
-      // Fallback: Alten Cache verwenden auch wenn abgelaufen
-      if (this.cachedMarkets.length > 0) {
-        console.log(`[ParadexTracker] Using expired cache as fallback (${this.cachedMarkets.length} PERP markets)`);
-        return this.cachedMarkets;
-      }
-
-      throw error;
-    }
-  }
-
-  /**
-   * Plant einen Reconnect-Versuch mit exponentieller Verzögerung
-   *
-   * Wichtig: Nach erfolgreichem Reconnect werden auch die Timer neu gestartet!
-   * Dies war ein kritischer Bug-Fix - ohne Timer-Restart wurden keine Snapshots mehr gespeichert.
-   */
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
-      console.error('[ParadexTracker] Max reconnect attempts reached');
-      this.updateTrackerStatus('failed', 'Max reconnect attempts reached');
-      return;
-    }
-
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-    }
-
-    this.reconnectAttempts++;
-    console.log(`[ParadexTracker] Scheduling reconnect attempt ${this.reconnectAttempts}`);
-
-    this.reconnectTimeout = setTimeout(async () => {
-      try {
-        await this.connect();
-
-        // WICHTIG: Timer nach Reconnect neu starten!
-        // Ohne dies würden nach einem Reconnect keine Snapshots mehr gespeichert
-        this.startSnapshotTimer();
-        this.startStatusCheck();
-        console.log('[ParadexTracker] Reconnect successful, timers restarted');
-      } catch (error) {
-        console.error('[ParadexTracker] Reconnect failed:', error);
-      }
-    }, this.RECONNECT_DELAY) as any;
-  }
-
-  /**
-   * Verarbeitet eingehende WebSocket-Nachrichten (JSON-RPC 2.0)
-   *
-   * Nachrichten-Typen:
-   * - result: Subscription erfolgreich
-   * - subscription: Daten vom markets_summary Channel
-   * - error: Fehler vom Server
+   * Verarbeitet WebSocket-Nachrichten
    */
   private async handleMessage(data: string): Promise<void> {
     try {
       const message: ParadexWebSocketMessage = JSON.parse(data);
 
-      // Subscription erfolgreich
-      if (message.id && message.result !== undefined) {
-        console.log('[ParadexTracker] Subscription confirmed:', message.result);
+      // Subscription Confirmation
+      if (message.result && message.id) {
+        console.log('[ParadexTracker] Subscription confirmed');
         return;
       }
 
-      // Fehler-Nachricht
-      if (message.error) {
-        console.error('[ParadexTracker] Server error:', message.error);
-        return;
-      }
+      // Market Data Updates
+      if (message.params && message.params.channel === 'markets_summary' && message.params.data) {
+        const marketData = message.params.data as ParadexMarketData;
 
-      // Market-Daten verarbeiten (subscription method mit markets_summary)
-      if (message.method === 'subscription' && message.params?.channel === 'markets_summary' && message.params.data) {
-        const data = message.params.data;
-
-        // Validierung: Pflichtfelder müssen vorhanden sein
-        if (data.symbol) {
-          // NUR PERP-Märkte speichern: Doppelte Prüfung mit striktem Filter
-          // 1. Prüfen ob Symbol in unserer gefilterten Liste ist
-          const matchedMarket = this.cachedMarkets.find(market => market.symbol === data.symbol);
-
-          // 2. Zusätzliche Sicherheit: Nochmal asset_kind prüfen (nur bei Match)
-          const isPerpMarket = matchedMarket && matchedMarket.asset_kind === 'PERP';
-
-          if (isPerpMarket) {
-            // In Buffer speichern - überschreibt alte Werte für selbes Symbol
-            this.dataBuffer.set(data.symbol, data);
-
-            // Logging alle 50 Updates um Spam zu vermeiden
-            if (this.messageCount % 50 === 0) {
-              console.log(`[ParadexTracker] Buffer size: ${this.dataBuffer.size} PERP markets`);
-            }
-          } else {
-            // Symbol ist kein PERP-Markt, überspringen
-            if (this.messageCount % 100 === 0) {
-              const reason = !matchedMarket ? 'not in cached markets' : `asset_kind is ${matchedMarket.asset_kind}`;
-              console.log(`[ParadexTracker] Skipping non-PERP market: ${data.symbol} (${reason})`);
-            }
-          }
-        } else {
-          console.warn('[ParadexTracker] Received invalid market data:', data);
+        // Nur PERP Markets
+        if (!marketData.symbol || !marketData.symbol.includes('PERP')) {
+          return;
         }
 
-        // Timestamp der letzten Nachricht aktualisieren
-        await this.updateTrackerStatus('running', null);
+        // In Buffer speichern
+        this.dataBuffer.set(marketData.symbol, marketData);
       }
     } catch (error) {
-      console.error('[ParadexTracker] Failed to handle message:', error);
+      console.error('[ParadexTracker] Failed to parse message:', error);
     }
   }
 
   /**
-   * Startet den Snapshot-Timer
-   * Speichert gepufferte Daten alle 15 Sekunden in die Datenbank
+   * Holt verfügbare Markets von der API
+   */
+  private async fetchAvailableMarkets(): Promise<ParadexMarket[]> {
+    const now = Date.now();
+
+    // Cache prüfen
+    if (this.cachedMarkets.length > 0 && now - this.lastMarketsFetch < this.MARKETS_CACHE_MS) {
+      return this.cachedMarkets;
+    }
+
+    console.log('[ParadexTracker] Fetching markets from API...');
+    const response = await fetch(`${this.API_BASE}/markets`);
+    const data = await response.json() as any;
+
+    if (!data.results || !Array.isArray(data.results)) {
+      throw new Error('Invalid markets response');
+    }
+
+    // Nur PERP Markets
+    const perpMarkets = data.results.filter((m: any) => m.asset_kind === 'PERP') as ParadexMarket[];
+
+    console.log(`[ParadexTracker] Fetched ${perpMarkets.length} PERP markets`);
+
+    this.cachedMarkets = perpMarkets;
+    this.lastMarketsFetch = now;
+
+    return perpMarkets;
+  }
+
+  /**
+   * Startet Snapshot Timer
    */
   private startSnapshotTimer(): void {
-    // Alten Timer clearen falls vorhanden (verhindert Duplikate)
     if (this.snapshotInterval) {
       clearInterval(this.snapshotInterval);
     }
 
     const intervalMs = parseInt(this.env.SNAPSHOT_INTERVAL_MS || '15000');
+    console.log(`[ParadexTracker] Starting snapshot timer (${intervalMs}ms)`);
 
     this.snapshotInterval = setInterval(async () => {
+      console.log('[ParadexTracker] Snapshot timer triggered');
       await this.saveSnapshot();
     }, intervalMs) as any;
   }
 
   /**
-   * Startet den Status-Check Timer
-   * Loggt Status-Informationen alle 30 Sekunden für Monitoring
+   * Startet Status Check Timer
    */
   private startStatusCheck(): void {
     if (this.statusCheckInterval) {
       clearInterval(this.statusCheckInterval);
     }
 
-    // Status-Check alle 30 Sekunden
     this.statusCheckInterval = setInterval(() => {
-      console.log(`[ParadexTracker] Status Check - Connected: ${this.isConnected}, Buffer: ${this.dataBuffer.size}, Messages: ${this.messageCount}`);
-
-      if (this.ws) {
-        console.log(`[ParadexTracker] WebSocket ready state: ${this.ws.readyState} (1=OPEN)`);
-      }
+      console.log(`[ParadexTracker] Status - Connected: ${this.isConnected}, Buffer: ${this.dataBuffer.size}, Messages: ${this.messageCount}`);
     }, 30000) as any;
   }
 
   /**
-   * Startet den Ping-Interval für Keep-Alive
-   * Sendet alle 30 Sekunden einen Ping an den Server (JSON-RPC 2.0)
+   * Startet Reconnect Timer (präventiv alle 45s)
    */
-  private startPingInterval(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
+  private startReconnectTimer(): void {
+    if (this.reconnectInterval) {
+      clearInterval(this.reconnectInterval);
     }
 
-    // Ping alle 30 Sekunden senden
-    this.pingInterval = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        console.log('[ParadexTracker] Sending ping to keep connection alive');
-        // JSON-RPC 2.0 Ping - Paradex könnte eine ping method oder heartbeat erwarten
-        const pingMsg = {
-          jsonrpc: '2.0',
-          method: 'ping',
-          id: this.messageIdCounter++,
-        };
-        this.ws.send(JSON.stringify(pingMsg));
-      }
-    }, this.PING_INTERVAL) as any;
+    console.log(`[ParadexTracker] Starting reconnect timer (${this.RECONNECT_INTERVAL_MS}ms)`);
+
+    this.reconnectInterval = setInterval(async () => {
+      console.log('[ParadexTracker] Preventive reconnect triggered');
+
+      // Snapshot speichern vor Reconnect
+      await this.saveSnapshot();
+
+      // Reconnect
+      await this.connect();
+
+      console.log('[ParadexTracker] Preventive reconnect completed');
+    }, this.RECONNECT_INTERVAL_MS) as any;
   }
 
   /**
-   * Speichert aktuellen Buffer-Inhalt als Snapshot in die D1 Datenbank
-   *
-   * Ablauf:
-   * 1. Buffer in Records konvertieren mit Validierung
-   * 2. Default-Werte für fehlende Felder setzen
-   * 3. Batch-Insert in D1 (performanter als einzelne Inserts)
-   * 4. Buffer leeren um Speicher freizugeben
-   *
-   * Wichtig: Buffer wird nach jedem Snapshot geleert!
-   * Dies verhindert Memory-Probleme bei langem Laufzeit
+   * Speichert Snapshot in Datenbank
    */
   private async saveSnapshot(): Promise<void> {
     console.log(`[ParadexTracker] saveSnapshot called, buffer size: ${this.dataBuffer.size}`);
 
     if (this.dataBuffer.size === 0) {
-      console.log('[ParadexTracker] No data to save in snapshot');
+      console.log('[ParadexTracker] No data to save');
       return;
     }
 
-    // Variable außerhalb des try-Blocks deklarieren, damit sie im catch-Block verfügbar ist
     let records: MarketStatsRecord[] = [];
 
     try {
       const recordedAt = Date.now();
-      console.log('[ParadexTracker] Starting to process buffer for snapshot');
+      console.log('[ParadexTracker] Processing buffer for snapshot');
 
-      // Buffer zu Records konvertieren mit Validierung
+      // Helper für sichere Werte
+      const getValue = (val: any, defaultVal: string = '0'): string => {
+        if (val === null || val === undefined || val === '') return defaultVal;
+        return String(val);
+      };
+
+      // Buffer zu Records konvertieren
       for (const [symbol, data] of this.dataBuffer.entries()) {
-        // Pflichtfelder validieren
         if (!data.symbol) {
-          console.warn(`[ParadexTracker] Skipping invalid record for ${symbol}`);
           continue;
         }
 
-        // Helper-Funktion: Default-Werte für fehlende Felder
-        const getValue = (value: any, defaultValue: any) => value !== undefined && value !== null ? value : defaultValue;
-
-        // Paradex hat keine market_id, wir verwenden einen Hash oder Index
+        // Market ID generieren
         const marketId = this.getMarketIdForSymbol(symbol);
 
-        // Open Interest USD berechnen: OI * mark_price
+        // Open Interest USD berechnen
         const markPrice = parseFloat(getValue(data.mark_price, '0'));
         const openInterest = parseFloat(getValue(data.open_interest, '0'));
         const openInterestUsd = (markPrice * openInterest).toString();
@@ -585,17 +420,17 @@ export class ParadexTracker implements DurableObject {
           mark_price: getValue(data.mark_price, '0'),
           open_interest: getValue(data.open_interest, '0'),
           open_interest_usd: openInterestUsd,
-          open_interest_limit: '0', // Paradex hat dieses Feld nicht
-          funding_clamp_small: '0', // Paradex hat dieses Feld nicht
-          funding_clamp_big: '0', // Paradex hat dieses Feld nicht
+          open_interest_limit: '0',
+          funding_clamp_small: '0',
+          funding_clamp_big: '0',
           last_trade_price: getValue(data.last_traded_price, '0'),
           current_funding_rate: getValue(data.funding_rate, '0'),
           funding_rate: getValue(data.future_funding_rate, getValue(data.funding_rate, '0')),
-          funding_timestamp: getValue(data.created_at, recordedAt),
+          funding_timestamp: parseFloat(getValue(data.created_at, String(recordedAt))),
           daily_base_token_volume: parseFloat(getValue(data.volume_24h, '0')),
           daily_quote_token_volume: parseFloat(getValue(data.total_volume, '0')),
-          daily_price_low: 0, // Paradex hat dieses Feld nicht direkt
-          daily_price_high: 0, // Paradex hat dieses Feld nicht direkt
+          daily_price_low: 0,
+          daily_price_high: 0,
           daily_price_change: parseFloat(getValue(data.price_change_rate_24h, '0')),
           recorded_at: recordedAt,
         });
@@ -606,7 +441,8 @@ export class ParadexTracker implements DurableObject {
         return;
       }
 
-      // Batch-Insert in D1 Database (performanter als einzelne Inserts)
+      // Batch Insert
+      const createdAt = Math.floor(recordedAt / 1000);
       const stmt = this.env.DB.prepare(`
         INSERT INTO market_stats (
           exchange, symbol, market_id, index_price, mark_price,
@@ -614,8 +450,8 @@ export class ParadexTracker implements DurableObject {
           funding_clamp_big, last_trade_price, current_funding_rate,
           funding_rate, funding_timestamp, daily_base_token_volume,
           daily_quote_token_volume, daily_price_low, daily_price_high,
-          daily_price_change, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          daily_price_change, recorded_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const batch = records.map((record) =>
@@ -639,72 +475,53 @@ export class ParadexTracker implements DurableObject {
           record.daily_price_low,
           record.daily_price_high,
           record.daily_price_change,
-          record.recorded_at
+          record.recorded_at,
+          createdAt
         )
       );
 
       await this.env.DB.batch(batch);
 
-      console.log(`[ParadexTracker] Saved snapshot with ${records.length} records`);
+      console.log(`[ParadexTracker] ✅ Saved ${records.length} records to database`);
 
-      // Buffer leeren um Speicher freizugeben
-      // Wichtig: Neue Daten werden ab jetzt wieder gesammelt
+      // Buffer leeren
       this.dataBuffer.clear();
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error('[ParadexTracker] Failed to save snapshot:', errorMessage);
-      console.error('[ParadexTracker] Snapshot details - Records count:', records.length);
-
-      // Ersten Record für Debugging ausgeben
+      console.error('[ParadexTracker] ❌ Failed to save snapshot:', errorMessage);
       if (records.length > 0) {
         console.error('[ParadexTracker] Sample record:', JSON.stringify(records[0]));
       }
-
       await this.updateTrackerStatus('error', `Snapshot save failed: ${errorMessage}`);
     }
   }
 
   /**
-   * Generiert eine Market ID für ein Symbol (Simple Hash-Funktion)
-   * Da Paradex keine market_id bereitstellt, erstellen wir eine aus dem Symbol
+   * Generiert Market ID aus Symbol
    */
   private getMarketIdForSymbol(symbol: string): number {
     let hash = 0;
     for (let i = 0; i < symbol.length; i++) {
       const char = symbol.charCodeAt(i);
       hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
+      hash = hash & hash;
     }
     return Math.abs(hash);
   }
 
   /**
-   * Aktualisiert den Tracker-Status in der Datenbank
-   * Wird verwendet für Monitoring und Status-Abfragen
+   * Aktualisiert Tracker-Status in Datenbank
    */
-  private async updateTrackerStatus(status: string, errorMessage: string | null): Promise<void> {
+  private async updateTrackerStatus(status: string, error: string | null): Promise<void> {
     try {
-      const now = Math.floor(Date.now() / 1000);
-
-      await this.env.DB.prepare(`
-        UPDATE tracker_status
-        SET status = ?,
-            last_message_at = ?,
-            error_message = ?,
-            reconnect_count = ?,
-            updated_at = ?
-        WHERE exchange = ?
-      `).bind(
-        status,
-        now,
-        errorMessage,
-        this.reconnectAttempts,
-        now,
-        'paradex'
-      ).run();
-    } catch (error) {
-      console.error('[ParadexTracker] Failed to update tracker status:', error);
+      await this.env.DB.prepare(
+        `UPDATE tracker_status SET status = ?, error_message = ?, updated_at = ? WHERE exchange = ?`
+      )
+        .bind(status, error, Math.floor(Date.now() / 1000), 'paradex')
+        .run();
+    } catch (err) {
+      console.error('[ParadexTracker] Failed to update tracker status:', err);
     }
   }
 }

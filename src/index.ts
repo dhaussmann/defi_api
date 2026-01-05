@@ -5,19 +5,49 @@ import { EdgeXTracker } from './EdgeXTracker';
 import { AsterTracker } from './AsterTracker';
 import { PacificaTracker } from './PacificaTracker';
 import { ExtendedTracker } from './ExtendedTracker';
+import { HyENATracker } from './HyENATracker';
 import { Env, ApiResponse, MarketStatsQuery, MarketStatsRecord } from './types';
+import { calculateAllVolatilityMetrics } from './volatility';
 
-export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker };
+export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker };
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Update normalized_tokens table every minute
-    ctx.waitUntil(updateNormalizedTokens(env));
+    const cronType = event.cron || '*/5 * * * *'; // Default to 5-minute cron
+    console.log(`[Cron] Scheduled event triggered: ${cronType} at ${new Date().toISOString()}`);
 
-    // Run hourly aggregation (at minute 0 of each hour)
-    const now = new Date();
-    if (now.getMinutes() === 0) {
-      ctx.waitUntil(aggregateOldMarketData(env));
+    // Every 5 minutes: Health check + normalized_tokens update + 1-minute aggregation
+    if (cronType === '*/5 * * * *') {
+      try {
+        console.log('[Cron] Running WebSocket health check');
+        await checkTrackerHealth(env);
+
+        console.log('[Cron] Updating normalized_tokens table');
+        await updateNormalizedTokens(env);
+
+        console.log('[Cron] Running 15s → 1m aggregation');
+        await aggregateTo1Minute(env);
+
+        console.log('[Cron] 5-minute tasks completed successfully');
+      } catch (error) {
+        console.error('[Cron] Error in 5-minute tasks:', error);
+      }
+    }
+
+    // Every hour: Aggregate 1m data to hourly and clean up
+    if (cronType === '0 * * * *') {
+      try {
+        console.log('[Cron] Running 1m → 1h aggregation and cleanup');
+        await aggregateTo1Hour(env);
+        console.log('[Cron] Hourly aggregation completed successfully');
+
+        // Calculate volatility metrics every hour
+        console.log('[Cron] Calculating volatility metrics for all markets');
+        await calculateAllVolatilityMetrics(env);
+        console.log('[Cron] Volatility metrics calculation completed');
+      } catch (error) {
+        console.error('[Cron] Error in hourly aggregation:', error);
+      }
     }
   },
 
@@ -46,6 +76,21 @@ export default {
         return await handleTrackerRoute(request, env, path, corsHeaders);
       } else if (path.startsWith('/api/')) {
         return await handleApiRoute(request, env, path, corsHeaders);
+      } else if (path === '/debug/update-normalized-tokens') {
+        // Debug endpoint to manually trigger normalized_tokens update
+        console.log('[Debug] Manually triggering normalized_tokens update');
+        await updateNormalizedTokens(env);
+        return Response.json({ success: true, message: 'normalized_tokens update triggered' }, { headers: corsHeaders });
+      } else if (path === '/debug/aggregate-1m') {
+        // Debug endpoint to manually trigger 1-minute aggregation
+        console.log('[Debug] Manually triggering 1-minute aggregation');
+        await aggregateTo1Minute(env);
+        return Response.json({ success: true, message: '1-minute aggregation triggered' }, { headers: corsHeaders });
+      } else if (path === '/debug/aggregate-1h') {
+        // Debug endpoint to manually trigger hourly aggregation
+        console.log('[Debug] Manually triggering hourly aggregation');
+        await aggregateTo1Hour(env);
+        return Response.json({ success: true, message: 'Hourly aggregation triggered' }, { headers: corsHeaders });
       } else if (path === '/' || path === '') {
         return handleRoot(corsHeaders);
       } else {
@@ -120,6 +165,11 @@ async function handleTrackerRoute(
     const id = env.EXTENDED_TRACKER.idFromName('extended-main');
     stub = env.EXTENDED_TRACKER.get(id);
     console.log('[Worker] Extended stub obtained');
+  } else if (path.startsWith('/tracker/hyena/')) {
+    exchange = 'hyena';
+    doPath = path.replace('/tracker/hyena', '');
+    const id = env.HYENA_TRACKER.idFromName('hyena-main');
+    stub = env.HYENA_TRACKER.get(id);
   } else {
     // Backward compatibility: /tracker/* routes to lighter
     exchange = 'lighter';
@@ -179,6 +229,153 @@ async function handleApiRoute(
       return await getData7d(env, url, corsHeaders);
     case '/api/data/30d':
       return await getData30d(env, url, corsHeaders);
+    case '/api/admin/aggregate-1m':
+      // Manual 1-minute aggregation trigger (temporary for testing)
+      try {
+        await aggregateTo1Minute(env);
+        return Response.json(
+          { success: true, message: '15s → 1m aggregation completed' },
+          { headers: corsHeaders }
+        );
+      } catch (error) {
+        return Response.json(
+          { success: false, error: error instanceof Error ? error.message : 'Aggregation failed' },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    case '/api/admin/aggregate-1h':
+      // Manual 1-hour aggregation trigger (temporary for testing)
+      try {
+        await aggregateTo1Hour(env);
+        return Response.json(
+          { success: true, message: '1m → 1h aggregation completed' },
+          { headers: corsHeaders }
+        );
+      } catch (error) {
+        return Response.json(
+          { success: false, error: error instanceof Error ? error.message : 'Aggregation failed' },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    case '/api/admin/calculate-volatility':
+      // Manual volatility calculation trigger
+      try {
+        console.log('[API] Starting volatility calculation');
+        await calculateAllVolatilityMetrics(env);
+        console.log('[API] Volatility calculation completed');
+        return Response.json(
+          { success: true, message: 'Volatility metrics calculated for all markets' },
+          { headers: corsHeaders }
+        );
+      } catch (error) {
+        console.error('[API] Volatility calculation error:', error);
+        return Response.json(
+          {
+            success: false,
+            error: error instanceof Error ? error.message : 'Volatility calculation failed',
+            stack: error instanceof Error ? error.stack : undefined
+          },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    case '/api/admin/calculate-volatility-for':
+      // Calculate volatility for specific market
+      try {
+        const targetExchange = url.searchParams.get('exchange');
+        const targetSymbol = url.searchParams.get('symbol');
+
+        if (!targetExchange || !targetSymbol) {
+          return Response.json(
+            { success: false, error: 'Missing exchange or symbol parameter' },
+            { status: 400, headers: corsHeaders }
+          );
+        }
+
+        console.log(`[API] Calculating volatility for ${targetExchange}/${targetSymbol}`);
+        const { calculateVolatilityMetrics } = await import('./volatility');
+
+        // Get original_symbol from normalized_tokens
+        const tokenResult = await env.DB.prepare(`
+          SELECT original_symbol FROM normalized_tokens
+          WHERE exchange = ? AND symbol = ?
+        `).bind(targetExchange, targetSymbol).first();
+
+        if (!tokenResult) {
+          return Response.json(
+            { success: false, error: 'Market not found' },
+            { status: 404, headers: corsHeaders }
+          );
+        }
+
+        const originalSymbol = (tokenResult as any).original_symbol;
+        const metrics = await calculateVolatilityMetrics(env, targetExchange, originalSymbol);
+
+        if (!metrics) {
+          return Response.json(
+            { success: false, error: 'Failed to calculate metrics (insufficient data)' },
+            { status: 500, headers: corsHeaders }
+          );
+        }
+
+        // Update normalized_tokens
+        await env.DB.prepare(`
+          UPDATE normalized_tokens
+          SET volatility_24h = ?, volatility_7d = ?, atr_14 = ?, bb_width = ?
+          WHERE exchange = ? AND symbol = ?
+        `).bind(
+          metrics.volatility_24h,
+          metrics.volatility_7d,
+          metrics.atr_14,
+          metrics.bb_width,
+          targetExchange,
+          targetSymbol
+        ).run();
+
+        // Insert/update volatility_stats
+        await env.DB.prepare(`
+          INSERT INTO volatility_stats (
+            exchange, symbol, period, volatility, atr, bb_width, std_dev,
+            high, low, avg_price, calculated_at
+          ) VALUES (?, ?, '24h', ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(exchange, symbol, period)
+          DO UPDATE SET
+            volatility = excluded.volatility,
+            atr = excluded.atr,
+            bb_width = excluded.bb_width,
+            std_dev = excluded.std_dev,
+            high = excluded.high,
+            low = excluded.low,
+            avg_price = excluded.avg_price,
+            calculated_at = excluded.calculated_at
+        `).bind(
+          targetExchange,
+          originalSymbol,
+          metrics.volatility_24h,
+          metrics.atr_14,
+          metrics.bb_width,
+          metrics.price_std_dev,
+          metrics.high_24h,
+          metrics.low_24h,
+          metrics.avg_price_24h,
+          Math.floor(Date.now() / 1000)
+        ).run();
+
+        console.log(`[API] Volatility calculated for ${targetExchange}/${targetSymbol}`);
+        return Response.json(
+          { success: true, data: metrics },
+          { headers: corsHeaders }
+        );
+      } catch (error) {
+        console.error('[API] Volatility calculation error:', error);
+        return Response.json(
+          {
+            success: false,
+            error: error instanceof Error ? error.message : 'Volatility calculation failed',
+            stack: error instanceof Error ? error.stack : undefined
+          },
+          { status: 500, headers: corsHeaders }
+        );
+      }
     default:
       return new Response('API endpoint not found', {
         status: 404,
@@ -189,8 +386,19 @@ async function handleApiRoute(
 
 // Normalize symbol names to a common format (base asset)
 function normalizeSymbol(symbol: string): string {
-  // Remove common suffixes
+  // Remove exchange-specific prefixes first
   let normalized = symbol
+    .replace(/^hyna:/i, '')       // HyENA: hyna:BTC -> BTC
+    .replace(/^hyperliquid:/i, '') // Hyperliquid: hyperliquid:BTC -> BTC
+    .replace(/^edgex:/i, '')      // EdgeX: edgex:BTC -> BTC
+    .replace(/^lighter:/i, '')    // Lighter: lighter:BTC -> BTC
+    .replace(/^paradex:/i, '')    // Paradex: paradex:BTC -> BTC
+    .replace(/^aster:/i, '')      // Aster: aster:BTC -> BTC
+    .replace(/^pacifica:/i, '')   // Pacifica: pacifica:BTC -> BTC
+    .replace(/^extended:/i, '');  // Extended: extended:BTC -> BTC
+
+  // Remove common suffixes
+  normalized = normalized
     .replace(/-USD-PERP$/i, '')  // Paradex: BTC-USD-PERP -> BTC
     .replace(/-USD$/i, '')        // Extended: BTC-USD -> BTC
     .replace(/USDT$/i, '')        // Aster: BTCUSDT -> BTC
@@ -202,104 +410,545 @@ function normalizeSymbol(symbol: string): string {
   return normalized;
 }
 
+/**
+ * Calculate annualized funding rate based on exchange-specific payment frequencies
+ *
+ * Different exchanges have different funding rate intervals:
+ * - Hyperliquid: API returns hourly rate (1/8 of 8h rate), paid 24x/day → multiply by 24 × 365 × 100
+ * - Paradex: 1-hour intervals, paid 24x/day → multiply by 24 × 365 × 100
+ * - EdgeX: 4-hour intervals, paid 6x/day → multiply by 6 × 365 × 100
+ * - Lighter: 8-hour intervals, rate already in %, paid 3x/day → multiply by 3 × 365 only
+ * - Others (Aster, Pacifica, Extended): 8-hour intervals, paid 3x/day → multiply by 3 × 365 × 100
+ *
+ * @param fundingRate - The funding rate from the exchange API (as decimal)
+ * @param exchange - The exchange name
+ * @returns Annual funding rate as a percentage
+ */
+function calculateAnnualFundingRate(fundingRate: number, exchange: string, intervalHours?: number): number {
+  switch (exchange.toLowerCase()) {
+    case 'hyperliquid':
+    case 'hyena':
+      // Hyperliquid & HyENA: 8-hour intervals (same API structure)
+      // 3 payments/day × 365 days × 100 (to percentage)
+      return fundingRate * 3 * 365 * 100;
+
+    case 'paradex':
+      // Paradex: 8-hour intervals (continuous accrual, 8h reference period)
+      // 3 payments/day × 365 days × 100 (to percentage)
+      return fundingRate * 3 * 365 * 100;
+
+    case 'edgex':
+      // EdgeX: 4-hour intervals
+      // 6 payments/day × 365 days × 100 (to percentage)
+      return fundingRate * 6 * 365 * 100;
+
+    case 'lighter':
+      // Lighter: 1-hour intervals, rate already in %
+      // 24 payments/day × 365 days (no × 100 because already in %)
+      return fundingRate * 24 * 365;
+
+    case 'aster':
+      // Aster: Variable intervals per token (1h, 4h, or 8h)
+      // Use provided intervalHours or fallback to 8h (most conservative)
+      if (intervalHours) {
+        const paymentsPerDay = 24 / intervalHours;
+        return fundingRate * paymentsPerDay * 365 * 100;
+      }
+      // Fallback: assume 8-hour intervals (most conservative)
+      return fundingRate * 3 * 365 * 100;
+
+    case 'extended':
+    case 'pacifica':
+      // Extended, Pacifica: 1-hour intervals
+      // 24 payments/day × 365 days × 100 (to percentage)
+      return fundingRate * 24 * 365 * 100;
+
+    default:
+      // Fallback: assume 8-hour intervals
+      // 3 payments/day × 365 days × 100 (to percentage)
+      return fundingRate * 3 * 365 * 100;
+  }
+}
+
+/**
+ * Health Check for WebSocket Trackers
+ *
+ * Checks if WebSocket-based trackers are connected and receiving data.
+ * If a tracker is disconnected or hasn't received messages recently, it triggers a reconnect.
+ *
+ * Runs every 5 minutes via cron job.
+ *
+ * WebSocket trackers: Lighter, Paradex, Pacifica, EdgeX
+ * Polling trackers (skipped): Hyperliquid, Aster, Extended
+ */
+async function checkTrackerHealth(env: Env): Promise<void> {
+  try {
+    console.log('[Health Check] Starting tracker health check (WebSocket + Polling trackers)');
+
+    const trackers = [
+      { name: 'lighter', binding: env.LIGHTER_TRACKER },
+      { name: 'paradex', binding: env.PARADEX_TRACKER },
+      { name: 'pacifica', binding: env.PACIFICA_TRACKER },
+      { name: 'edgex', binding: env.EDGEX_TRACKER },
+      { name: 'hyperliquid', binding: env.HYPERLIQUID_TRACKER },
+      { name: 'aster', binding: env.ASTER_TRACKER },
+      { name: 'extended', binding: env.EXTENDED_TRACKER },
+      { name: 'hyena', binding: env.HYENA_TRACKER },
+    ];
+
+    const results: Array<{ name: string; status: string; action: string }> = [];
+
+    for (const tracker of trackers) {
+      try {
+        // Get Durable Object stub
+        const id = tracker.binding.idFromName(`${tracker.name}-main`);
+        const stub = tracker.binding.get(id);
+
+        // Check tracker status
+        const statusResponse = await stub.fetch(new Request('https://dummy/status'));
+        const statusData = await statusResponse.json() as any;
+
+        const connected = statusData.data?.connected;
+        const bufferSize = statusData.data?.bufferSize || 0;
+        const isRunning = statusData.data?.isRunning;
+
+        // For WebSocket trackers (lighter, paradex, pacifica, edgex): check connected and bufferSize
+        // For polling trackers (hyperliquid, aster, extended): check isRunning
+        const isPollingTracker = ['hyperliquid', 'aster', 'extended'].includes(tracker.name);
+        const isHealthy = isPollingTracker
+          ? (isRunning !== false)  // For polling trackers, just check if running
+          : (connected && bufferSize > 0);  // For WebSocket trackers, check connected AND has data
+
+        console.log(`[Health Check] ${tracker.name}: ${isPollingTracker ? 'isRunning=' + isRunning : 'connected=' + connected + ', bufferSize=' + bufferSize}`);
+
+        // If unhealthy, trigger restart
+        if (!isHealthy) {
+          console.warn(`[Health Check] ${tracker.name} is unhealthy - triggering ${isPollingTracker ? 'restart' : 'reconnect'}`);
+
+          // Trigger restart
+          const startResponse = await stub.fetch(new Request('https://dummy/start'));
+          const startData = await startResponse.json() as any;
+
+          results.push({
+            name: tracker.name,
+            status: isHealthy ? 'healthy' : (isPollingTracker ? 'not_running' : (connected ? 'connected_no_data' : 'disconnected')),
+            action: startData.success ? 'restarted' : 'restart_failed'
+          });
+
+          console.log(`[Health Check] ${tracker.name} restart result:`, startData.success ? 'SUCCESS' : 'FAILED');
+        } else {
+          results.push({
+            name: tracker.name,
+            status: 'healthy',
+            action: 'none'
+          });
+        }
+      } catch (error) {
+        console.error(`[Health Check] Failed to check ${tracker.name}:`, error);
+        results.push({
+          name: tracker.name,
+          status: 'error',
+          action: 'check_failed'
+        });
+      }
+    }
+
+    // Log summary
+    const unhealthy = results.filter(r => r.action !== 'none');
+    if (unhealthy.length > 0) {
+      console.warn(`[Health Check] Found ${unhealthy.length} unhealthy tracker(s):`, unhealthy);
+    } else {
+      console.log('[Health Check] All trackers are healthy');
+    }
+
+    // Update database with health check timestamp
+    await env.DB.prepare(
+      `UPDATE tracker_status
+       SET updated_at = ?
+       WHERE exchange IN ('lighter', 'paradex', 'pacifica', 'edgex')`
+    )
+      .bind(Math.floor(Date.now() / 1000))
+      .run();
+
+    console.log('[Health Check] Completed successfully');
+  } catch (error) {
+    console.error('[Health Check] Failed:', error);
+  }
+}
+
 // Update normalized_tokens table with latest data from all exchanges
 async function updateNormalizedTokens(env: Env): Promise<void> {
-  try {
-    console.log('[Cron] Starting normalized_tokens update');
+  const startTime = Date.now();
+  console.log('[UpdateNormalizedTokens] ========== STARTING UPDATE ==========');
 
-    // Get latest data from each exchange
-    // OPTIMIZATION: Replaced expensive ROW_NUMBER window function with simpler MAX grouping
-    // Previous: ROW_NUMBER processes all rows to rank them
-    // New: MAX finds latest timestamp directly, then joins back for full row data
-    const query = `
-      SELECT ms1.*
-      FROM market_stats ms1
-      INNER JOIN (
-        SELECT exchange, symbol, MAX(created_at) as max_created
-        FROM market_stats
-        WHERE created_at > ?
-        GROUP BY exchange, symbol
-      ) ms2 ON ms1.exchange = ms2.exchange
-           AND ms1.symbol = ms2.symbol
-           AND ms1.created_at = ms2.max_created
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const tenMinutesAgo = now - 600;  // Use 10 minutes instead of 5 for better coverage
+
+    console.log(`[UpdateNormalizedTokens] Current time: ${now} (${new Date(now * 1000).toISOString()})`);
+    console.log(`[UpdateNormalizedTokens] Looking for data newer than: ${tenMinutesAgo} (${new Date(tenMinutesAgo * 1000).toISOString()})`);
+
+    // Step 1: Query latest data from market_stats (simple, direct query)
+    const statsQuery = `
+      SELECT
+        exchange,
+        symbol,
+        mark_price,
+        index_price,
+        open_interest_usd,
+        funding_rate,
+        next_funding_time,
+        funding_interval_hours,
+        daily_base_token_volume,
+        daily_price_change,
+        daily_price_low,
+        daily_price_high,
+        created_at,
+        MAX(created_at) as latest_time
+      FROM market_stats
+      WHERE created_at > ?
+      GROUP BY exchange, symbol
     `;
 
-    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300;
-    const result = await env.DB.prepare(query).bind(fiveMinutesAgo).all();
+    console.log('[UpdateNormalizedTokens] Step 1: Querying market_stats...');
+    const statsResult = await env.DB.prepare(statsQuery).bind(tenMinutesAgo).all();
 
-    if (!result.success || !result.results) {
-      throw new Error('Failed to fetch latest market data');
+    if (!statsResult.success) {
+      throw new Error(`market_stats query failed: ${JSON.stringify(statsResult)}`);
     }
 
-    console.log(`[Cron] Fetched ${result.results.length} latest market entries`);
+    console.log(`[UpdateNormalizedTokens] Found ${statsResult.results?.length || 0} records from market_stats`);
 
-    // Group by normalized symbol and prepare upserts
+    // Log breakdown by exchange
+    const exchangeCounts = new Map<string, number>();
+    for (const row of (statsResult.results || []) as any[]) {
+      exchangeCounts.set(row.exchange, (exchangeCounts.get(row.exchange) || 0) + 1);
+    }
+    console.log('[UpdateNormalizedTokens] Breakdown by exchange:', Object.fromEntries(exchangeCounts));
+
+    // Step 2: Process and upsert each record
     const upserts: D1PreparedStatement[] = [];
-    const now = Math.floor(Date.now() / 1000);
+    let processedCount = 0;
+    let errorCount = 0;
 
-    for (const row of result.results as any[]) {
-      const normalizedSymbol = normalizeSymbol(row.symbol);
-      const fundingRate = parseFloat(row.funding_rate || '0');
+    for (const row of (statsResult.results || []) as any[]) {
+      try {
+        const normalizedSymbol = normalizeSymbol(row.symbol);
+        const fundingRate = parseFloat(row.funding_rate || '0');
+        const intervalHours = row.funding_interval_hours ? parseInt(row.funding_interval_hours) : undefined;
+        const fundingRateAnnual = calculateAnnualFundingRate(fundingRate, row.exchange, intervalHours);
 
-      // Lighter provides funding_rate already as percentage (0.0012 = 0.0012%)
-      // Other exchanges provide it as decimal (0.0001 = 0.01%)
-      // APR calculation: rate * 3 (per day) * 365 (days per year) * 100 (to percentage)
-      // For Lighter: already in %, so multiply by 3 * 365 only
-      const fundingRateAnnual = row.exchange === 'lighter'
-        ? fundingRate * 3 * 365
-        : fundingRate * 3 * 365 * 100;
+        // Log first few entries for debugging
+        if (processedCount < 3) {
+          console.log(`[UpdateNormalizedTokens] Sample ${processedCount + 1}:`, {
+            exchange: row.exchange,
+            symbol: row.symbol,
+            normalizedSymbol,
+            fundingRate,
+            intervalHours,
+            fundingRateAnnual,
+            markPrice: row.mark_price,
+          });
+        }
 
-      upserts.push(
-        env.DB.prepare(
-          `INSERT INTO normalized_tokens (
-            symbol, exchange, mark_price, index_price, open_interest_usd,
-            volume_24h, funding_rate, funding_rate_annual, next_funding_time,
-            price_change_24h, price_low_24h, price_high_24h, original_symbol, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(symbol, exchange) DO UPDATE SET
-            mark_price = excluded.mark_price,
-            index_price = excluded.index_price,
-            open_interest_usd = excluded.open_interest_usd,
-            volume_24h = excluded.volume_24h,
-            funding_rate = excluded.funding_rate,
-            funding_rate_annual = excluded.funding_rate_annual,
-            next_funding_time = excluded.next_funding_time,
-            price_change_24h = excluded.price_change_24h,
-            price_low_24h = excluded.price_low_24h,
-            price_high_24h = excluded.price_high_24h,
-            original_symbol = excluded.original_symbol,
-            updated_at = excluded.updated_at`
-        ).bind(
-          normalizedSymbol,
-          row.exchange,
-          parseFloat(row.mark_price || '0'),
-          parseFloat(row.index_price || '0'),
-          parseFloat(row.open_interest_usd || '0'),
-          parseFloat(row.daily_base_token_volume || '0'),
-          fundingRate,
-          fundingRateAnnual,
-          row.next_funding_time ? parseInt(row.next_funding_time) : null,
-          parseFloat(row.daily_price_change || '0'),
-          parseFloat(row.daily_price_low || '0'),
-          parseFloat(row.daily_price_high || '0'),
-          row.symbol,
-          now
-        )
-      );
+        upserts.push(
+          env.DB.prepare(
+            `INSERT INTO normalized_tokens (
+              symbol, exchange, mark_price, index_price, open_interest_usd,
+              volume_24h, funding_rate, funding_rate_annual, next_funding_time,
+              price_change_24h, price_low_24h, price_high_24h, original_symbol, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, exchange) DO UPDATE SET
+              mark_price = excluded.mark_price,
+              index_price = excluded.index_price,
+              open_interest_usd = excluded.open_interest_usd,
+              volume_24h = excluded.volume_24h,
+              funding_rate = excluded.funding_rate,
+              funding_rate_annual = excluded.funding_rate_annual,
+              next_funding_time = excluded.next_funding_time,
+              price_change_24h = excluded.price_change_24h,
+              price_low_24h = excluded.price_low_24h,
+              price_high_24h = excluded.price_high_24h,
+              original_symbol = excluded.original_symbol,
+              updated_at = excluded.updated_at`
+          ).bind(
+            normalizedSymbol,
+            row.exchange,
+            parseFloat(row.mark_price || '0'),
+            parseFloat(row.index_price || '0'),
+            parseFloat(row.open_interest_usd || '0'),
+            parseFloat(row.daily_base_token_volume || '0'),
+            fundingRate,
+            fundingRateAnnual,
+            row.next_funding_time ? parseInt(row.next_funding_time) : null,
+            parseFloat(row.daily_price_change || '0'),
+            parseFloat(row.daily_price_low || '0'),
+            parseFloat(row.daily_price_high || '0'),
+            row.symbol,
+            now
+          )
+        );
+
+        processedCount++;
+      } catch (rowError) {
+        errorCount++;
+        console.error(`[UpdateNormalizedTokens] Error processing row:`, row, rowError);
+      }
     }
 
+    console.log(`[UpdateNormalizedTokens] Processed ${processedCount} records, ${errorCount} errors`);
+    console.log(`[UpdateNormalizedTokens] Prepared ${upserts.length} UPSERT statements`);
+
+    // Step 3: Execute batch upsert
     if (upserts.length > 0) {
-      await env.DB.batch(upserts);
-      console.log(`[Cron] Updated ${upserts.length} normalized token entries`);
+      console.log('[UpdateNormalizedTokens] Step 3: Executing batch upsert...');
+      const batchResult = await env.DB.batch(upserts);
+
+      console.log('[UpdateNormalizedTokens] Batch execution completed');
+      console.log('[UpdateNormalizedTokens] Batch result summary:', {
+        totalStatements: upserts.length,
+        results: batchResult.length,
+        firstResult: batchResult[0]
+      });
+
+      console.log(`[UpdateNormalizedTokens] ✅ Successfully updated ${upserts.length} entries`);
     } else {
-      console.log('[Cron] No updates needed');
+      console.log('[UpdateNormalizedTokens] ⚠️ No records to update');
     }
+
+    const duration = Date.now() - startTime;
+    console.log(`[UpdateNormalizedTokens] ========== COMPLETED in ${duration}ms ==========`);
+
   } catch (error) {
-    console.error('[Cron] Failed to update normalized_tokens:', error);
+    const duration = Date.now() - startTime;
+    console.error(`[UpdateNormalizedTokens] ❌ FAILED after ${duration}ms:`, error);
+    if (error instanceof Error) {
+      console.error('[UpdateNormalizedTokens] Error details:', {
+        message: error.message,
+        stack: error.stack
+      });
+    }
   }
 }
 
 // Aggregate old market_stats data (>7 days) into market_history table
+// Aggregate 15-second snapshots to 1-minute aggregates
+// Runs every 5 minutes, aggregates data older than 5 minutes
+async function aggregateTo1Minute(env: Env): Promise<void> {
+  try {
+    console.log('[Cron] Starting 15s → 1m aggregation for data older than 5 minutes');
+
+    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - (5 * 60);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Check if there's data to aggregate
+    const oldestQuery = await env.DB.prepare(
+      'SELECT MIN(created_at) as oldest FROM market_stats WHERE created_at < ?'
+    ).bind(fiveMinutesAgo).first<{ oldest: number }>();
+
+    if (!oldestQuery || !oldestQuery.oldest) {
+      console.log('[Cron] No 15s data to aggregate to 1m');
+      return;
+    }
+
+    const oldestTimestamp = oldestQuery.oldest;
+    console.log(`[Cron] Found data from ${new Date(oldestTimestamp * 1000).toISOString()} to aggregate`);
+
+    // Process in 1-hour batches to avoid memory issues
+    const batchSize = 60 * 60; // 1 hour in seconds
+    let batchStart = oldestTimestamp;
+    let totalAggregated = 0;
+    let totalDeleted = 0;
+    let batchCount = 0;
+    const maxBatches = 10; // Limit to 10 hours of data per run
+
+    while (batchStart < fiveMinutesAgo && batchCount < maxBatches) {
+      const batchEnd = Math.min(batchStart + batchSize, fiveMinutesAgo);
+
+      console.log(`[Cron] Processing batch ${batchCount + 1}: ${new Date(batchStart * 1000).toISOString()} to ${new Date(batchEnd * 1000).toISOString()}`);
+
+      // Aggregate this specific batch
+      const aggregationQuery = `
+        INSERT OR REPLACE INTO market_stats_1m (
+          exchange, symbol, normalized_symbol,
+          avg_mark_price, avg_index_price, min_price, max_price, price_volatility,
+          volume_base, volume_quote,
+          avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
+          avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
+          minute_timestamp, sample_count, created_at
+        )
+        SELECT
+          exchange,
+          symbol,
+          UPPER(
+            REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol,
+              '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')
+          ) as normalized_symbol,
+          -- Prices
+          AVG(CAST(mark_price AS REAL)) as avg_mark_price,
+          AVG(CAST(index_price AS REAL)) as avg_index_price,
+          MIN(CAST(mark_price AS REAL)) as min_price,
+          MAX(CAST(mark_price AS REAL)) as max_price,
+          -- Volatility: (max - min) / avg * 100
+          CASE
+            WHEN AVG(CAST(mark_price AS REAL)) > 0
+            THEN ((MAX(CAST(mark_price AS REAL)) - MIN(CAST(mark_price AS REAL))) / AVG(CAST(mark_price AS REAL)) * 100)
+            ELSE 0
+          END as price_volatility,
+          -- Volume (sum)
+          SUM(daily_base_token_volume) as volume_base,
+          SUM(daily_quote_token_volume) as volume_quote,
+          -- Open Interest
+          AVG(CAST(open_interest AS REAL)) as avg_open_interest,
+          AVG(CAST(open_interest_usd AS REAL)) as avg_open_interest_usd,
+          MAX(CAST(open_interest_usd AS REAL)) as max_open_interest_usd,
+          -- Funding Rate
+          AVG(CAST(funding_rate AS REAL)) as avg_funding_rate,
+          CASE
+            WHEN exchange = 'hyperliquid' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+            WHEN exchange = 'paradex' THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+            WHEN exchange = 'edgex' THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
+            WHEN exchange = 'lighter' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365
+            WHEN exchange = 'aster' THEN
+              CASE
+                WHEN AVG(funding_interval_hours) = 1 THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+                WHEN AVG(funding_interval_hours) = 4 THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
+                WHEN AVG(funding_interval_hours) = 8 THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+                ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+              END
+            WHEN exchange = 'extended' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+            WHEN exchange = 'pacifica' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+            ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+          END as avg_funding_rate_annual,
+          MIN(CAST(funding_rate AS REAL)) as min_funding_rate,
+          MAX(CAST(funding_rate AS REAL)) as max_funding_rate,
+          -- Timestamp rounded to minute
+          (created_at / 60) * 60 as minute_timestamp,
+          COUNT(*) as sample_count,
+          ? as created_at
+        FROM market_stats
+        WHERE created_at >= ? AND created_at < ?
+        GROUP BY exchange, symbol, minute_timestamp
+      `;
+
+      const result = await env.DB.prepare(aggregationQuery)
+        .bind(now, batchStart, batchEnd)
+        .run();
+
+      totalAggregated += result.meta.changes || 0;
+      console.log(`[Cron] Batch ${batchCount + 1}: Aggregated ${result.meta.changes} 1-minute records`);
+
+      // Delete the 15-second snapshots that were aggregated in this batch
+      const deleteResult = await env.DB.prepare(
+        'DELETE FROM market_stats WHERE created_at >= ? AND created_at < ?'
+      ).bind(batchStart, batchEnd).run();
+
+      totalDeleted += deleteResult.meta.changes || 0;
+      console.log(`[Cron] Batch ${batchCount + 1}: Deleted ${deleteResult.meta.changes} old 15s snapshots`);
+
+      batchStart = batchEnd;
+      batchCount++;
+    }
+
+    console.log(`[Cron] 1-minute aggregation completed: ${batchCount} batches processed, ${totalAggregated} records aggregated, ${totalDeleted} snapshots deleted`);
+
+    if (batchStart < fiveMinutesAgo) {
+      console.log(`[Cron] More data remaining to aggregate (from ${new Date(batchStart * 1000).toISOString()}), will continue in next run`);
+    }
+
+  } catch (error) {
+    console.error('[Cron] Failed to aggregate to 1-minute:', error);
+  }
+}
+
+// Aggregate 1-minute data to hourly aggregates
+// Runs every hour, aggregates data older than 1 hour
+async function aggregateTo1Hour(env: Env): Promise<void> {
+  try {
+    console.log('[Cron] Starting 1m → 1h aggregation for data older than 1 hour');
+
+    const oneHourAgo = Math.floor(Date.now() / 1000) - (60 * 60);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Check if there's data to aggregate
+    const oldestQuery = await env.DB.prepare(
+      'SELECT MIN(created_at) as oldest FROM market_stats_1m WHERE created_at < ?'
+    ).bind(oneHourAgo).first<{ oldest: number }>();
+
+    if (!oldestQuery || !oldestQuery.oldest) {
+      console.log('[Cron] No 1m data to aggregate to 1h');
+      return;
+    }
+
+    console.log(`[Cron] Aggregating 1m data from ${new Date(oldestQuery.oldest * 1000).toISOString()}`);
+
+    // Aggregate to hourly intervals
+    const aggregationQuery = `
+      INSERT OR REPLACE INTO market_history (
+        exchange, symbol, normalized_symbol,
+        avg_mark_price, avg_index_price, min_price, max_price, price_volatility,
+        volume_base, volume_quote,
+        avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
+        avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
+        hour_timestamp, sample_count, aggregated_at
+      )
+      SELECT
+        exchange,
+        symbol,
+        normalized_symbol,
+        -- Prices (weighted average)
+        SUM(avg_mark_price * sample_count) / SUM(sample_count) as avg_mark_price,
+        SUM(avg_index_price * sample_count) / SUM(sample_count) as avg_index_price,
+        MIN(min_price) as min_price,
+        MAX(max_price) as max_price,
+        -- Recalculate volatility from min/max
+        CASE
+          WHEN SUM(avg_mark_price * sample_count) / SUM(sample_count) > 0
+          THEN ((MAX(max_price) - MIN(min_price)) / (SUM(avg_mark_price * sample_count) / SUM(sample_count)) * 100)
+          ELSE 0
+        END as price_volatility,
+        -- Volume (sum)
+        SUM(volume_base) as volume_base,
+        SUM(volume_quote) as volume_quote,
+        -- Open Interest (weighted average)
+        SUM(avg_open_interest * sample_count) / SUM(sample_count) as avg_open_interest,
+        SUM(avg_open_interest_usd * sample_count) / SUM(sample_count) as avg_open_interest_usd,
+        MAX(max_open_interest_usd) as max_open_interest_usd,
+        -- Funding Rate (weighted average)
+        SUM(avg_funding_rate * sample_count) / SUM(sample_count) as avg_funding_rate,
+        SUM(avg_funding_rate_annual * sample_count) / SUM(sample_count) as avg_funding_rate_annual,
+        MIN(min_funding_rate) as min_funding_rate,
+        MAX(max_funding_rate) as max_funding_rate,
+        -- Timestamp rounded to hour
+        (minute_timestamp / 3600) * 3600 as hour_timestamp,
+        SUM(sample_count) as sample_count,
+        ? as aggregated_at
+      FROM market_stats_1m
+      WHERE created_at < ?
+      GROUP BY exchange, symbol, hour_timestamp
+    `;
+
+    const result = await env.DB.prepare(aggregationQuery)
+      .bind(now, oneHourAgo)
+      .run();
+
+    console.log(`[Cron] Aggregated ${result.meta.changes} hourly records`);
+
+    // Delete the 1-minute data that was aggregated
+    const deleteResult = await env.DB.prepare(
+      'DELETE FROM market_stats_1m WHERE created_at < ?'
+    ).bind(oneHourAgo).run();
+
+    console.log(`[Cron] Deleted ${deleteResult.meta.changes} old 1m aggregates`);
+    console.log('[Cron] Hourly aggregation completed successfully');
+
+  } catch (error) {
+    console.error('[Cron] Failed to aggregate to 1-hour:', error);
+  }
+}
+
+// DEPRECATED: Old aggregation function (7-day retention)
+// Kept for backwards compatibility, will be removed in next version
 async function aggregateOldMarketData(env: Env): Promise<void> {
   try {
     console.log('[Cron] Starting market_stats aggregation for data older than 7 days');
@@ -359,8 +1008,19 @@ async function aggregateOldMarketData(env: Env): Promise<void> {
         -- Funding Rate
         AVG(CAST(funding_rate AS REAL)) as avg_funding_rate,
         CASE
-          WHEN exchange = 'lighter'
-          THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365
+          WHEN exchange = 'hyperliquid' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+          WHEN exchange = 'paradex' THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+          WHEN exchange = 'edgex' THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
+          WHEN exchange = 'lighter' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365
+          WHEN exchange = 'aster' THEN
+            CASE
+              WHEN AVG(funding_interval_hours) = 1 THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+              WHEN AVG(funding_interval_hours) = 4 THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
+              WHEN AVG(funding_interval_hours) = 8 THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+              ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+            END
+          WHEN exchange = 'extended' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+          WHEN exchange = 'pacifica' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
           ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
         END as avg_funding_rate_annual,
         MIN(CAST(funding_rate AS REAL)) as min_funding_rate,
@@ -491,7 +1151,7 @@ async function getAllMarkets(
     const symbol = url.searchParams.get('symbol');
     const limit = parseInt(url.searchParams.get('limit') || '1000');
 
-    // Build query with optional filters
+    // Build query with optional filters (including volatility metrics)
     let query = `
       SELECT
         symbol,
@@ -507,6 +1167,10 @@ async function getAllMarkets(
         price_change_24h,
         price_low_24h,
         price_high_24h,
+        volatility_24h,
+        volatility_7d,
+        atr_14,
+        bb_width,
         datetime(updated_at, 'unixepoch') as timestamp
       FROM normalized_tokens
     `;
@@ -537,7 +1201,7 @@ async function getAllMarkets(
       throw new Error('Database query failed');
     }
 
-    // Map results
+    // Map results (including volatility metrics)
     const markets = result.results.map((row: any) => ({
       symbol: row.symbol,
       exchange: row.exchange,
@@ -552,6 +1216,10 @@ async function getAllMarkets(
       price_change_24h: row.price_change_24h || 0,
       price_low_24h: row.price_low_24h || 0,
       price_high_24h: row.price_high_24h || 0,
+      volatility_24h: row.volatility_24h || null,
+      volatility_7d: row.volatility_7d || null,
+      atr_14: row.atr_14 || null,
+      bb_width: row.bb_width || null,
       timestamp: row.timestamp,
     }));
 
@@ -1091,14 +1759,17 @@ async function getNormalizedData(
       toTimestamp = nowSeconds;
     }
 
-    // Determine data source based on time range
-    const needsHistoricalData = fromTimestamp < sevenDaysAgo;
-    const needsRecentData = toTimestamp > sevenDaysAgo;
+    // Determine data source based on time range and interval
+    // For 1h interval, ALWAYS use market_history (aggregated data) since market_stats only keeps 5 minutes
+    // For other intervals, distinguish between historical (>7d) and recent (<7d) data
+    const needsHistoricalData = interval === '1h' || fromTimestamp < sevenDaysAgo;
+    const needsRecentData = interval !== '1h' && toTimestamp > sevenDaysAgo;
 
     let allData: any[] = [];
 
-    // Query 1: Historical aggregated data (market_history) for data >= 7 days old
-    if (needsHistoricalData) {
+    // Query 1: Hourly aggregated data from market_history
+    // This is used for: (a) all 1h interval requests, or (b) data >= 7 days old for other intervals
+    if (interval === '1h' || needsHistoricalData) {
       let historyQuery = `
         SELECT
           exchange,
@@ -1133,7 +1804,8 @@ async function getNormalizedData(
       }
 
       historyQuery += ` AND hour_timestamp >= ? AND hour_timestamp <= ?`;
-      historyParams.push(fromTimestamp, Math.min(toTimestamp, sevenDaysAgo));
+      // For 1h interval, use full time range; otherwise limit to data older than 7 days
+      historyParams.push(fromTimestamp, interval === '1h' ? toTimestamp : Math.min(toTimestamp, sevenDaysAgo));
 
       historyQuery += ` ORDER BY hour_timestamp DESC LIMIT ?`;
       historyParams.push(limit);
@@ -1145,6 +1817,156 @@ async function getNormalizedData(
           historyResult.results.map((row: any) => ({
             ...row,
             data_source: 'aggregated',
+            interval: '1h',
+          }))
+        );
+      }
+
+      // Query 1c: For 1h interval requests, supplement with recent non-aggregated hourly data from market_stats_1m
+      // This fills the gap between the last aggregated hour in market_history and the current time
+      if (interval === '1h') {
+        // Get the latest hour_timestamp from market_history for this symbol/exchange
+        let latestHourQuery = `
+          SELECT MAX(hour_timestamp) as latest_hour
+          FROM market_history
+          WHERE normalized_symbol = ?
+        `;
+
+        const latestHourParams: any[] = [symbol];
+
+        if (exchange) {
+          latestHourQuery += ` AND exchange = ?`;
+          latestHourParams.push(exchange);
+        }
+
+        const latestHourResult = await env.DB.prepare(latestHourQuery).bind(...latestHourParams).first();
+        const latestAggregatedHour = (latestHourResult?.latest_hour as number) || 0;
+
+        // Only query market_stats_1m if there's a gap between the latest aggregated hour and the requested toTimestamp
+        if (latestAggregatedHour < toTimestamp) {
+          // Query market_stats_1m for the hours after the latest aggregated hour
+          // Aggregate 1-minute data into hourly buckets
+          let recentHourlyQuery = `
+            WITH hourly_buckets AS (
+              SELECT
+                exchange,
+                symbol as original_symbol,
+                normalized_symbol,
+                (minute_timestamp - (minute_timestamp % 3600)) as hour_timestamp,
+                MIN(min_price) as min_price,
+                MAX(max_price) as max_price,
+                AVG(avg_mark_price) as mark_price,
+                AVG(avg_index_price) as index_price,
+                SUM(volume_base) as volume_base,
+                SUM(volume_quote) as volume_quote,
+                AVG(avg_open_interest) as open_interest,
+                AVG(avg_open_interest_usd) as open_interest_usd,
+                MAX(max_open_interest_usd) as max_open_interest_usd,
+                AVG(avg_funding_rate) as funding_rate,
+                AVG(avg_funding_rate_annual) as funding_rate_annual,
+                MIN(min_funding_rate) as min_funding_rate,
+                MAX(max_funding_rate) as max_funding_rate,
+                SUM(sample_count) as sample_count
+              FROM market_stats_1m
+              WHERE normalized_symbol = ?
+          `;
+
+          const recentHourlyParams: any[] = [symbol];
+
+          if (exchange) {
+            recentHourlyQuery += ` AND exchange = ?`;
+            recentHourlyParams.push(exchange);
+          }
+
+          // Only get data after the latest aggregated hour
+          recentHourlyQuery += ` AND minute_timestamp > ?`;
+          recentHourlyParams.push(latestAggregatedHour);
+
+          // And before or at the requested toTimestamp
+          recentHourlyQuery += ` AND minute_timestamp <= ?`;
+          recentHourlyParams.push(toTimestamp);
+
+          recentHourlyQuery += `
+              GROUP BY exchange, original_symbol, normalized_symbol, hour_timestamp
+            )
+            SELECT *,
+              CASE
+                WHEN mark_price > 0
+                THEN ((max_price - min_price) / mark_price * 100)
+                ELSE 0
+              END as volatility,
+              datetime(hour_timestamp, 'unixepoch') as timestamp_iso
+            FROM hourly_buckets
+            ORDER BY hour_timestamp DESC
+          `;
+
+          const recentHourlyResult = await env.DB.prepare(recentHourlyQuery).bind(...recentHourlyParams).all();
+
+          if (recentHourlyResult.success && recentHourlyResult.results && recentHourlyResult.results.length > 0) {
+            console.log(`[API] Supplementing with ${recentHourlyResult.results.length} recent hourly buckets from market_stats_1m`);
+
+            allData = allData.concat(
+              recentHourlyResult.results.map((row: any) => ({
+                ...row,
+                timestamp: row.hour_timestamp,
+                data_source: 'recent_aggregated',
+                interval: '1h',
+              }))
+            );
+          }
+        }
+      }
+
+      // Query 1b: Also fetch imported historical funding rate data for gaps
+      // This covers data from Jan 1, 2025 onwards that might not be in market_history yet
+      let fundingHistoryQuery = `
+        SELECT
+          exchange,
+          trading_pair as original_symbol,
+          symbol as normalized_symbol,
+          NULL as mark_price,
+          NULL as index_price,
+          NULL as min_price,
+          NULL as max_price,
+          NULL as volatility,
+          NULL as volume_base,
+          NULL as volume_quote,
+          NULL as open_interest,
+          NULL as open_interest_usd,
+          NULL as max_open_interest_usd,
+          funding_rate,
+          annualized_rate as funding_rate_annual,
+          funding_rate as min_funding_rate,
+          funding_rate as max_funding_rate,
+          CAST(collected_at / 1000 AS INTEGER) as timestamp,
+          1 as sample_count,
+          datetime(CAST(collected_at / 1000 AS INTEGER), 'unixepoch') as timestamp_iso
+        FROM funding_rate_history
+        WHERE symbol = ?
+      `;
+
+      const fundingHistoryParams: any[] = [symbol];
+
+      if (exchange) {
+        fundingHistoryQuery += ` AND exchange = ?`;
+        fundingHistoryParams.push(exchange);
+      }
+
+      fundingHistoryQuery += ` AND CAST(collected_at / 1000 AS INTEGER) >= ? AND CAST(collected_at / 1000 AS INTEGER) <= ?`;
+      // For 1h interval, use full time range; otherwise limit to data older than 7 days
+      fundingHistoryParams.push(fromTimestamp, interval === '1h' ? toTimestamp : Math.min(toTimestamp, sevenDaysAgo));
+
+      fundingHistoryQuery += ` ORDER BY collected_at DESC LIMIT ?`;
+      fundingHistoryParams.push(limit);
+
+      const fundingHistoryResult = await env.DB.prepare(fundingHistoryQuery).bind(...fundingHistoryParams).all();
+
+      if (fundingHistoryResult.success && fundingHistoryResult.results) {
+        // Add imported historical data
+        allData = allData.concat(
+          fundingHistoryResult.results.map((row: any) => ({
+            ...row,
+            data_source: 'imported',
             interval: '1h',
           }))
         );
@@ -1304,6 +2126,34 @@ async function getNormalizedData(
         return await getNormalizedData(env, new URL(url.toString().replace('interval=auto', 'interval=1h')), corsHeaders);
       }
     }
+
+    // Deduplicate data: Prefer 'aggregated' over 'imported' for same timestamp+exchange
+    // This prevents duplicate entries when both market_history and funding_rate_history have data
+    const deduplicatedData = new Map<string, any>();
+
+    for (const row of allData) {
+      const key = `${row.exchange}_${row.timestamp}`;
+      const existing = deduplicatedData.get(key);
+
+      // Priority: aggregated > calculated > imported > raw
+      const priority: Record<string, number> = { aggregated: 3, calculated: 2, imported: 1, raw: 0 };
+      const existingPriority = existing ? (priority[existing.data_source as string] || 0) : -1;
+      const newPriority = priority[row.data_source as string] || 0;
+
+      if (!existing || newPriority > existingPriority) {
+        deduplicatedData.set(key, row);
+      } else if (newPriority === existingPriority && row.data_source === 'imported') {
+        // If both are 'imported', merge the data (fill in missing fields)
+        deduplicatedData.set(key, {
+          ...existing,
+          ...Object.fromEntries(
+            Object.entries(row).filter(([_, v]) => v !== null && v !== undefined)
+          )
+        });
+      }
+    }
+
+    allData = Array.from(deduplicatedData.values());
 
     // Sort all data by timestamp (descending)
     allData.sort((a, b) => b.timestamp - a.timestamp);
@@ -1767,7 +2617,87 @@ async function getLatestStats(
       ? [exchange, symbol, exchange, symbol]
       : [exchange, exchange];
 
-    const result = await env.DB.prepare(query).bind(...params).all<MarketStatsRecord>();
+    let result = await env.DB.prepare(query).bind(...params).all<MarketStatsRecord>();
+
+    // Fallback 1: If no data in market_stats, try market_stats_1m (1-minute aggregates, last ~1 hour)
+    if (!result.results || result.results.length === 0) {
+      const query1m = `
+        SELECT
+          exchange,
+          symbol,
+          normalized_symbol,
+          avg_mark_price as mark_price,
+          avg_index_price as index_price,
+          min_price,
+          max_price,
+          price_volatility,
+          volume_base as daily_base_token_volume,
+          volume_quote as daily_quote_token_volume,
+          avg_open_interest as open_interest,
+          avg_open_interest_usd as open_interest_usd,
+          max_open_interest_usd,
+          avg_funding_rate as funding_rate,
+          avg_funding_rate_annual,
+          min_funding_rate,
+          max_funding_rate,
+          minute_timestamp as created_at,
+          sample_count,
+          created_at as recorded_at
+        FROM market_stats_1m
+        WHERE exchange = ?
+        ${symbol ? 'AND symbol = ?' : ''}
+        AND id IN (
+          SELECT MAX(id)
+          FROM market_stats_1m
+          WHERE exchange = ?
+          ${symbol ? 'AND symbol = ?' : ''}
+          GROUP BY symbol
+        )
+        ORDER BY symbol
+      `;
+
+      result = await env.DB.prepare(query1m).bind(...params).all<MarketStatsRecord>();
+    }
+
+    // Fallback 2: If still no data, try market_history (hourly aggregates, permanent storage)
+    if (!result.results || result.results.length === 0) {
+      const queryHistory = `
+        SELECT
+          exchange,
+          symbol,
+          normalized_symbol,
+          avg_mark_price as mark_price,
+          avg_index_price as index_price,
+          min_price,
+          max_price,
+          price_volatility,
+          volume_base as daily_base_token_volume,
+          volume_quote as daily_quote_token_volume,
+          avg_open_interest as open_interest,
+          avg_open_interest_usd as open_interest_usd,
+          max_open_interest_usd,
+          avg_funding_rate as funding_rate,
+          avg_funding_rate_annual,
+          min_funding_rate,
+          max_funding_rate,
+          hour_timestamp as created_at,
+          sample_count,
+          aggregated_at as recorded_at
+        FROM market_history
+        WHERE exchange = ?
+        ${symbol ? 'AND symbol = ?' : ''}
+        AND id IN (
+          SELECT MAX(id)
+          FROM market_history
+          WHERE exchange = ?
+          ${symbol ? 'AND symbol = ?' : ''}
+          GROUP BY symbol
+        )
+        ORDER BY symbol
+      `;
+
+      result = await env.DB.prepare(queryHistory).bind(...params).all<MarketStatsRecord>();
+    }
 
     return Response.json(
       {

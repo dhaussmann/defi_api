@@ -406,6 +406,7 @@ export class AsterTracker implements DurableObject {
         open_interest_usd: openInterestUsd,
         funding_rate: data.lastFundingRate,
         next_funding_time: data.nextFundingTime?.toString() || null,
+        funding_interval_hours: data.fundingIntervalHours || null,
         created_at: Math.floor(recordedAt / 1000),
       };
 
@@ -422,11 +423,11 @@ export class AsterTracker implements DurableObject {
         return this.env.DB.prepare(
           `INSERT INTO market_stats (
             exchange, symbol, market_id, last_trade_price, index_price, mark_price,
-            open_interest, open_interest_usd, funding_rate, next_funding_time, created_at,
+            open_interest, open_interest_usd, funding_rate, next_funding_time, funding_interval_hours, created_at,
             open_interest_limit, funding_clamp_small, funding_clamp_big,
             current_funding_rate, funding_timestamp, daily_base_token_volume,
             daily_quote_token_volume, daily_price_low, daily_price_high, daily_price_change, recorded_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           record.exchange,
           record.symbol,
@@ -438,6 +439,7 @@ export class AsterTracker implements DurableObject {
           record.open_interest_usd || '0',
           record.funding_rate || '0',
           record.next_funding_time || '0',
+          record.funding_interval_hours || null,
           record.created_at,
           '0', // open_interest_limit
           '0', // funding_clamp_small
@@ -464,7 +466,7 @@ export class AsterTracker implements DurableObject {
   private async updateTrackerStatus(status: string, error: string | null): Promise<void> {
     try {
       await this.env.DB.prepare(
-        `UPDATE tracker_status SET status = ?, last_error = ?, updated_at = ? WHERE exchange = ?`
+        `UPDATE tracker_status SET status = ?, error_message = ?, updated_at = ? WHERE exchange = ?`
       )
         .bind(status, error, Math.floor(Date.now() / 1000), 'aster')
         .run();

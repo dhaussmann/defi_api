@@ -55,6 +55,8 @@ export interface MarketStatsRecord {
   current_funding_rate: string;
   funding_rate: string;
   funding_timestamp: number;
+  next_funding_time?: string;
+  funding_interval_hours?: number;
   daily_base_token_volume: number;
   daily_quote_token_volume: number;
   daily_price_low: number;
@@ -327,6 +329,7 @@ export interface Env {
   ASTER_TRACKER: DurableObjectNamespace;
   PACIFICA_TRACKER: DurableObjectNamespace;
   EXTENDED_TRACKER: DurableObjectNamespace;
+  HYENA_TRACKER: DurableObjectNamespace;
   DB: D1Database;
   SNAPSHOT_INTERVAL_MS?: string;
 }

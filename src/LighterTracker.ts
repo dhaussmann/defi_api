@@ -396,8 +396,13 @@ export class LighterTracker implements DurableObject {
 
         // WICHTIG: Timer nach Reconnect neu starten!
         // Ohne dies würden nach einem Reconnect keine Snapshots mehr gespeichert
-        this.startSnapshotTimer();
-        this.startStatusCheck();
+        // Fix: Nur starten wenn nicht bereits aktiv, um überlappende Intervalle zu vermeiden
+        if (!this.snapshotInterval) {
+          this.startSnapshotTimer();
+        }
+        if (!this.statusCheckInterval) {
+          this.startStatusCheck();
+        }
         console.log('[LighterTracker] Reconnect successful, timers restarted');
       } catch (error) {
         console.error('[LighterTracker] Reconnect failed:', error);
@@ -556,6 +561,14 @@ export class LighterTracker implements DurableObject {
         const openInterest = parseFloat(getValue(stats.open_interest, '0'));
         const openInterestUsd = (openInterest * 2).toString();
 
+        // Lighter liefert Funding Rates als Prozentwerte (z.B. "0.0012" = 0.12%)
+        // Andere Exchanges liefern Dezimalwerte (z.B. "0.000012" = 0.0012%)
+        // Daher müssen wir Lighter-Werte durch 100 teilen für Konsistenz
+        const fundingRateRaw = getValue(stats.funding_rate, '0');
+        const currentFundingRateRaw = getValue(stats.current_funding_rate, '0');
+        const fundingRate = (parseFloat(fundingRateRaw) / 100).toString();
+        const currentFundingRate = (parseFloat(currentFundingRateRaw) / 100).toString();
+
         records.push({
           exchange: 'lighter',
           symbol: stats.symbol,
@@ -568,8 +581,8 @@ export class LighterTracker implements DurableObject {
           funding_clamp_small: getValue(stats.funding_clamp_small, '0'),
           funding_clamp_big: getValue(stats.funding_clamp_big, '0'),
           last_trade_price: getValue(stats.last_trade_price, '0'),
-          current_funding_rate: getValue(stats.current_funding_rate, '0'),
-          funding_rate: getValue(stats.funding_rate, '0'),
+          current_funding_rate: currentFundingRate,
+          funding_rate: fundingRate,
           funding_timestamp: getValue(stats.funding_timestamp, recordedAt),
           daily_base_token_volume: getValue(stats.daily_base_token_volume, 0),
           daily_quote_token_volume: getValue(stats.daily_quote_token_volume, 0),

@@ -382,6 +382,7 @@ export class HyperliquidTracker implements DurableObject {
       }
 
       // Batch-Insert in D1 Database
+      const createdAt = Math.floor(recordedAt / 1000);
       const stmt = this.env.DB.prepare(`
         INSERT INTO market_stats (
           exchange, symbol, market_id, index_price, mark_price,
@@ -389,8 +390,8 @@ export class HyperliquidTracker implements DurableObject {
           funding_clamp_big, last_trade_price, current_funding_rate,
           funding_rate, funding_timestamp, daily_base_token_volume,
           daily_quote_token_volume, daily_price_low, daily_price_high,
-          daily_price_change, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          daily_price_change, recorded_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const batch = records.map((record) =>
@@ -414,7 +415,8 @@ export class HyperliquidTracker implements DurableObject {
           record.daily_price_low,
           record.daily_price_high,
           record.daily_price_change,
-          record.recorded_at
+          record.recorded_at,
+          createdAt
         )
       );
 

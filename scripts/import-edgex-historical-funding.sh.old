@@ -1,0 +1,247 @@
+#!/bin/bash
+
+# EdgeX Historical Funding Rate Import Script
+# ============================================
+# This script imports historical funding rate data from EdgeX for all available contracts
+# and stores hourly aggregated data in the database.
+#
+# Usage:
+#   ./import-edgex-historical-funding.sh [START_DATE] [END_DATE]
+#
+# Examples:
+#   ./import-edgex-historical-funding.sh                    # Import all available history
+#   ./import-edgex-historical-funding.sh 2025-01-01         # Import from specific date
+#   ./import-edgex-historical-funding.sh 2025-01-01 2025-12-31  # Import date range
+
+set -e
+
+# Configuration
+API_BASE="https://pro.edgex.exchange/api/v1/public"
+DB_NAME="defiapi-db"
+REMOTE="--remote"
+PAGE_SIZE=100
+EXCHANGE="edgex"
+
+# Parse arguments
+START_DATE="${1:-2025-01-01}"
+END_DATE="${2:-$(date -u '+%Y-%m-%d')}"
+
+# Convert dates to milliseconds timestamp
+START_TS=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "$START_DATE 00:00:00" "+%s" 2>/dev/null || date -d "$START_DATE 00:00:00" "+%s" 2>/dev/null)000
+END_TS=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "$END_DATE 23:59:59" "+%s" 2>/dev/null || date -d "$END_DATE 23:59:59" "+%s" 2>/dev/null)999
+
+echo "=========================================="
+echo "EdgeX Historical Funding Rate Import"
+echo "=========================================="
+echo "Date range: $START_DATE to $END_DATE"
+echo "Timestamp range: $START_TS to $END_TS"
+echo ""
+
+# Step 1: Get all active contracts
+echo "[1/4] Fetching EdgeX contracts..."
+METADATA=$(curl -s "$API_BASE/meta/getMetaData")
+CONTRACTS=$(echo "$METADATA" | jq -r '.data.contractList[] | select(.enableDisplay == true) | "\(.contractId)|\(.contractName)"')
+
+CONTRACT_COUNT=$(echo "$CONTRACTS" | wc -l | tr -d ' ')
+echo "Found $CONTRACT_COUNT active contracts"
+echo ""
+
+# Step 2: Create temporary import file
+TEMP_FILE=$(mktemp)
+trap "rm -f $TEMP_FILE" EXIT
+
+echo "[2/4] Collecting funding rate data..."
+CURRENT_CONTRACT=0
+
+while IFS='|' read -r CONTRACT_ID CONTRACT_NAME; do
+  ((CURRENT_CONTRACT++))
+  echo "  [$CURRENT_CONTRACT/$CONTRACT_COUNT] Processing $CONTRACT_NAME (ID: $CONTRACT_ID)..."
+
+  # Fetch funding rate history with pagination
+  OFFSET_DATA=""
+  PAGE=1
+  TOTAL_RECORDS=0
+
+  while true; do
+    # Build API URL
+    API_URL="$API_BASE/funding/getFundingRatePage?contractId=$CONTRACT_ID&size=$PAGE_SIZE"
+    API_URL="$API_URL&filterBeginTimeInclusive=$START_TS&filterEndTimeExclusive=$END_TS"
+
+    if [ -n "$OFFSET_DATA" ]; then
+      API_URL="$API_URL&offsetData=$OFFSET_DATA"
+    fi
+
+    # Fetch page
+    RESPONSE=$(curl -s "$API_URL")
+
+    # Check for errors
+    CODE=$(echo "$RESPONSE" | jq -r '.code')
+    if [ "$CODE" != "SUCCESS" ]; then
+      echo "    Warning: API error for $CONTRACT_NAME: $CODE"
+      break
+    fi
+
+    # Extract data
+    DATA_LIST=$(echo "$RESPONSE" | jq -r '.data.dataList[]? | @json')
+
+    if [ -z "$DATA_LIST" ]; then
+      break
+    fi
+
+    # Process each funding rate record
+    while IFS= read -r record; do
+      # Extract fields
+      FUNDING_TS=$(echo "$record" | jq -r '.fundingTimestamp')
+      ORACLE_PRICE=$(echo "$record" | jq -r '.oraclePrice')
+      INDEX_PRICE=$(echo "$record" | jq -r '.indexPrice')
+      FUNDING_RATE=$(echo "$record" | jq -r '.fundingRate')
+      IS_SETTLEMENT=$(echo "$record" | jq -r '.isSettlement')
+
+      # Convert timestamp to Unix epoch (seconds)
+      EPOCH_TS=$((FUNDING_TS / 1000))
+
+      # Round to nearest hour
+      HOUR_TS=$((EPOCH_TS - (EPOCH_TS % 3600)))
+
+      # Write to temp file (CSV format)
+      echo "$CONTRACT_NAME|$HOUR_TS|$ORACLE_PRICE|$INDEX_PRICE|$FUNDING_RATE|$IS_SETTLEMENT" >> "$TEMP_FILE"
+      ((TOTAL_RECORDS++))
+    done <<< "$DATA_LIST"
+
+    # Check for next page
+    OFFSET_DATA=$(echo "$RESPONSE" | jq -r '.data.nextPageOffsetData // empty')
+
+    if [ -z "$OFFSET_DATA" ]; then
+      break
+    fi
+
+    ((PAGE++))
+  done
+
+  echo "    Collected $TOTAL_RECORDS records"
+done <<< "$CONTRACTS"
+
+echo ""
+echo "[3/4] Aggregating data by hour..."
+
+# Aggregate by hour and symbol
+AGGREGATED_FILE=$(mktemp)
+trap "rm -f $TEMP_FILE $AGGREGATED_FILE" EXIT
+
+sort "$TEMP_FILE" | awk -F'|' '
+{
+  key = $1 "|" $2  # symbol|hour_timestamp
+
+  if (!(key in count)) {
+    symbol[key] = $1
+    hour_ts[key] = $2
+    sum_oracle_price[key] = 0
+    sum_index_price[key] = 0
+    sum_funding_rate[key] = 0
+    count[key] = 0
+  }
+
+  sum_oracle_price[key] += $3
+  sum_index_price[key] += $4
+  sum_funding_rate[key] += $5
+  count[key]++
+}
+END {
+  for (k in count) {
+    avg_oracle = sum_oracle_price[k] / count[k]
+    avg_index = sum_index_price[k] / count[k]
+    avg_funding = sum_funding_rate[k] / count[k]
+    printf "%s|%s|%.8f|%.8f|%.10f|%d\n", symbol[k], hour_ts[k], avg_oracle, avg_index, avg_funding, count[k]
+  }
+}
+' | sort -t'|' -k2,2n > "$AGGREGATED_FILE"
+
+AGGREGATED_COUNT=$(wc -l < "$AGGREGATED_FILE" | tr -d ' ')
+echo "  Created $AGGREGATED_COUNT hourly aggregates"
+echo ""
+
+# Step 4: Import into database
+echo "[4/4] Importing into database..."
+
+# Create SQL insert statements
+SQL_FILE=$(mktemp)
+trap "rm -f $TEMP_FILE $AGGREGATED_FILE $SQL_FILE" EXIT
+
+# D1 doesn't support BEGIN TRANSACTION in SQL files, so we just create individual statements
+> "$SQL_FILE"
+
+BATCH_SIZE=500
+BATCH_COUNT=0
+CURRENT_BATCH=0
+
+while IFS='|' read -r SYMBOL HOUR_TS AVG_ORACLE AVG_INDEX AVG_FUNDING SAMPLE_COUNT; do
+  # Normalize symbol (remove USD suffix if present)
+  NORMALIZED_SYMBOL=$(echo "$SYMBOL" | sed 's/USD$//')
+
+  # Calculate annual funding rate
+  AVG_FUNDING_ANNUAL=$(echo "$AVG_FUNDING * 100 * 3 * 365" | bc -l)
+
+  # Create INSERT OR REPLACE statement
+  cat >> "$SQL_FILE" <<EOF
+INSERT INTO market_history (
+  exchange, symbol, normalized_symbol, hour_timestamp,
+  avg_mark_price, avg_index_price, avg_funding_rate, avg_funding_rate_annual,
+  min_price, max_price, price_volatility,
+  volume_base, volume_quote,
+  avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
+  min_funding_rate, max_funding_rate,
+  sample_count, created_at
+) VALUES (
+  '$EXCHANGE', '$SYMBOL', '$NORMALIZED_SYMBOL', $HOUR_TS,
+  $AVG_ORACLE, $AVG_INDEX, $AVG_FUNDING, $AVG_FUNDING_ANNUAL,
+  $AVG_ORACLE, $AVG_ORACLE, 0.0,
+  0.0, 0.0,
+  0.0, 0.0, 0.0,
+  $AVG_FUNDING, $AVG_FUNDING,
+  $SAMPLE_COUNT, unixepoch('now')
+) ON CONFLICT(exchange, symbol, hour_timestamp) DO UPDATE SET
+  avg_mark_price = COALESCE(avg_mark_price, $AVG_ORACLE),
+  avg_index_price = COALESCE(avg_index_price, $AVG_INDEX),
+  avg_funding_rate = COALESCE(avg_funding_rate, $AVG_FUNDING),
+  avg_funding_rate_annual = COALESCE(avg_funding_rate_annual, $AVG_FUNDING_ANNUAL),
+  min_funding_rate = COALESCE(min_funding_rate, $AVG_FUNDING),
+  max_funding_rate = COALESCE(max_funding_rate, $AVG_FUNDING),
+  sample_count = sample_count + $SAMPLE_COUNT;
+EOF
+
+  ((CURRENT_BATCH++))
+done < "$AGGREGATED_FILE"
+
+# Execute SQL
+echo "  Executing database import..."
+npx wrangler d1 execute "$DB_NAME" $REMOTE --file="$SQL_FILE"
+
+echo ""
+echo "=========================================="
+echo "Import Summary"
+echo "=========================================="
+echo "Contracts processed: $CONTRACT_COUNT"
+echo "Hourly aggregates created: $AGGREGATED_COUNT"
+echo "Date range: $START_DATE to $END_DATE"
+echo ""
+
+# Verify import
+echo "Verification:"
+START_TS_SEC=$((START_TS / 1000))
+END_TS_SEC=$((END_TS / 1000))
+
+npx wrangler d1 execute "$DB_NAME" $REMOTE --command "
+SELECT
+  COUNT(DISTINCT symbol) as symbols,
+  COUNT(*) as total_hours,
+  datetime(MIN(hour_timestamp), 'unixepoch') as earliest,
+  datetime(MAX(hour_timestamp), 'unixepoch') as latest
+FROM market_history
+WHERE exchange = '$EXCHANGE'
+  AND hour_timestamp >= $START_TS_SEC
+  AND hour_timestamp <= $END_TS_SEC
+" --json | jq -r '.[] | .results[] | "  Symbols: \(.symbols)\n  Hours: \(.total_hours)\n  Range: \(.earliest) to \(.latest)"'
+
+echo ""
+echo "Import completed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo "=========================================="

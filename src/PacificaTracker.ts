@@ -346,6 +346,7 @@ export class PacificaTracker implements DurableObject {
 
     const records: any[] = [];
     const recordedAt = Date.now();
+    const createdAt = Math.floor(recordedAt / 1000);
 
     console.log('[PacificaTracker] Starting to process buffer for database save');
 
@@ -369,7 +370,7 @@ export class PacificaTracker implements DurableObject {
         funding_rate: data.funding,
         next_funding_time: null, // Pacifica liefert next_funding rate, nicht time
         volume_24h: data.volume_24h,
-        created_at: Math.floor(recordedAt / 1000),
+        created_at: createdAt,
       };
 
       records.push(record);
@@ -427,7 +428,7 @@ export class PacificaTracker implements DurableObject {
   private async updateTrackerStatus(status: string, error: string | null): Promise<void> {
     try {
       await this.env.DB.prepare(
-        `UPDATE tracker_status SET status = ?, last_error = ?, updated_at = ? WHERE exchange = ?`
+        `UPDATE tracker_status SET status = ?, error_message = ?, updated_at = ? WHERE exchange = ?`
       )
         .bind(status, error, Math.floor(Date.now() / 1000), 'pacifica')
         .run();

@@ -12,7 +12,8 @@ bindings = [
   { name = "EDGEX_TRACKER", class_name = "EdgeXTracker" },
   { name = "ASTER_TRACKER", class_name = "AsterTracker" },
   { name = "PACIFICA_TRACKER", class_name = "PacificaTracker" },
-  { name = "EXTENDED_TRACKER", class_name = "ExtendedTracker" }
+  { name = "EXTENDED_TRACKER", class_name = "ExtendedTracker" },
+  { name = "HYENA_TRACKER", class_name = "HyENATracker" }
 ]
 
 [[migrations]]
@@ -43,6 +44,10 @@ new_classes = ["PacificaTracker"]
 tag = "v7"
 new_classes = ["ExtendedTracker"]
 
+[[migrations]]
+tag = "v8"
+new_classes = ["HyENATracker"]
+
 # D1 Database
 [[d1_databases]]
 binding = "DB"
@@ -53,9 +58,15 @@ database_id = "77ba166f-0989-45d4-aa63-dc4ff0d517cb"
 [vars]
 SNAPSHOT_INTERVAL_MS = "15000"
 
-# Cron Triggers - Update normalized_tokens table every 5 minutes
-# OPTIMIZATION: Reduced from every minute to every 5 minutes
-# Previous load: 825 UPSERTs × 60 = 49,500 operations/hour
-# New load: 825 UPSERTs × 12 = 9,900 operations/hour (80% reduction)
+# Cron Triggers - Two-Tier Aggregation System
+# 1. Every 5 minutes: Health check + tokens update + 1-minute aggregation
+#    - WebSocket health monitoring (Lighter, Paradex, Pacifica, EdgeX)
+#    - Updates normalized_tokens table (825 UPSERTs × 12 = 9,900/hour)
+#    - Aggregates 15-second snapshots → 1-minute aggregates (data >5min old)
+#    - Deletes aggregated 15-second snapshots (reduces DB by ~4×)
+# 2. Every hour at minute 0: Hourly aggregation and cleanup
+#    - Aggregates 1-minute data → hourly aggregates (data >1h old)
+#    - Deletes aggregated 1-minute data (reduces DB by ~60×)
+#    - Final compression: 240× reduction (15s → 1h via 1m intermediate)
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "0 * * * *"]

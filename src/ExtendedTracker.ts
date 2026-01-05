@@ -280,6 +280,7 @@ export class ExtendedTracker implements DurableObject {
 
     const records: any[] = [];
     const recordedAt = Date.now();
+    const createdAt = Math.floor(recordedAt / 1000);
 
     console.log('[ExtendedTracker] Starting to process buffer for database save');
 
@@ -308,7 +309,7 @@ export class ExtendedTracker implements DurableObject {
         price_change_24h_percent: stats.dailyPriceChangePercentage,
         daily_low: stats.dailyLow,
         daily_high: stats.dailyHigh,
-        created_at: Math.floor(recordedAt / 1000),
+        created_at: createdAt,
       };
 
       records.push(record);
