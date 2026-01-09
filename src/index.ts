@@ -6,10 +6,14 @@ import { AsterTracker } from './AsterTracker';
 import { PacificaTracker } from './PacificaTracker';
 import { ExtendedTracker } from './ExtendedTracker';
 import { HyENATracker } from './HyENATracker';
+import { XYZTracker } from './XYZTracker';
+import { FLXTracker } from './FLXTracker';
+import { VNTLTracker } from './VNTLTracker';
+import { KMTracker } from './KMTracker';
 import { Env, ApiResponse, MarketStatsQuery, MarketStatsRecord } from './types';
 import { calculateAllVolatilityMetrics } from './volatility';
 
-export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker };
+export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker };
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
@@ -170,6 +174,26 @@ async function handleTrackerRoute(
     doPath = path.replace('/tracker/hyena', '');
     const id = env.HYENA_TRACKER.idFromName('hyena-main');
     stub = env.HYENA_TRACKER.get(id);
+  } else if (path.startsWith('/tracker/xyz/')) {
+    exchange = 'xyz';
+    doPath = path.replace('/tracker/xyz', '');
+    const id = env.XYZ_TRACKER.idFromName('xyz-main');
+    stub = env.XYZ_TRACKER.get(id);
+  } else if (path.startsWith('/tracker/flx/')) {
+    exchange = 'flx';
+    doPath = path.replace('/tracker/flx', '');
+    const id = env.FLX_TRACKER.idFromName('flx-main');
+    stub = env.FLX_TRACKER.get(id);
+  } else if (path.startsWith('/tracker/vntl/')) {
+    exchange = 'vntl';
+    doPath = path.replace('/tracker/vntl', '');
+    const id = env.VNTL_TRACKER.idFromName('vntl-main');
+    stub = env.VNTL_TRACKER.get(id);
+  } else if (path.startsWith('/tracker/km/')) {
+    exchange = 'km';
+    doPath = path.replace('/tracker/km', '');
+    const id = env.KM_TRACKER.idFromName('km-main');
+    stub = env.KM_TRACKER.get(id);
   } else {
     // Backward compatibility: /tracker/* routes to lighter
     exchange = 'lighter';
@@ -389,6 +413,10 @@ function normalizeSymbol(symbol: string): string {
   // Remove exchange-specific prefixes first
   let normalized = symbol
     .replace(/^hyna:/i, '')       // HyENA: hyna:BTC -> BTC
+    .replace(/^xyz:/i, '')        // XYZ: xyz:BTC -> BTC
+    .replace(/^flx:/i, '')        // FLX: flx:BTC -> BTC
+    .replace(/^vntl:/i, '')       // VNTL: vntl:BTC -> BTC
+    .replace(/^km:/i, '')         // KM: km:BTC -> BTC
     .replace(/^hyperliquid:/i, '') // Hyperliquid: hyperliquid:BTC -> BTC
     .replace(/^edgex:/i, '')      // EdgeX: edgex:BTC -> BTC
     .replace(/^lighter:/i, '')    // Lighter: lighter:BTC -> BTC
@@ -428,7 +456,11 @@ function calculateAnnualFundingRate(fundingRate: number, exchange: string, inter
   switch (exchange.toLowerCase()) {
     case 'hyperliquid':
     case 'hyena':
-      // Hyperliquid & HyENA: 8-hour intervals (same API structure)
+    case 'xyz':
+    case 'flx':
+    case 'vntl':
+    case 'km':
+      // Hyperliquid & HIP-3 DEXs (HyENA, XYZ, FLX, VNTL, KM): 8-hour intervals
       // 3 payments/day × 365 days × 100 (to percentage)
       return fundingRate * 3 * 365 * 100;
 
@@ -494,6 +526,10 @@ async function checkTrackerHealth(env: Env): Promise<void> {
       { name: 'aster', binding: env.ASTER_TRACKER },
       { name: 'extended', binding: env.EXTENDED_TRACKER },
       { name: 'hyena', binding: env.HYENA_TRACKER },
+      { name: 'xyz', binding: env.XYZ_TRACKER },
+      { name: 'flx', binding: env.FLX_TRACKER },
+      { name: 'vntl', binding: env.VNTL_TRACKER },
+      { name: 'km', binding: env.KM_TRACKER },
     ];
 
     const results: Array<{ name: string; status: string; action: string }> = [];
@@ -760,7 +796,7 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
     let totalAggregated = 0;
     let totalDeleted = 0;
     let batchCount = 0;
-    const maxBatches = 10; // Limit to 10 hours of data per run
+    const maxBatches = 3; // Limit to 3 hours of data per run (reduced from 10 to handle backlog)
 
     while (batchStart < fiveMinutesAgo && batchCount < maxBatches) {
       const batchEnd = Math.min(batchStart + batchSize, fiveMinutesAgo);
@@ -781,7 +817,12 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
           exchange,
           symbol,
           UPPER(
-            REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol,
+            REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+              symbol,
+              'hyna:', ''), 'xyz:', ''), 'flx:', ''), 'vntl:', ''), 'km:', ''),
+              'HYNA:', ''), 'XYZ:', ''), 'FLX:', ''), 'VNTL:', ''), 'KM:', ''),
+              'edgex:', ''), 'EDGEX:', ''),
+              'aster:', ''), 'ASTER:', ''),
               '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')
           ) as normalized_symbol,
           -- Prices
@@ -818,6 +859,7 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
               END
             WHEN exchange = 'extended' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
             WHEN exchange = 'pacifica' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+            WHEN exchange IN ('hyena', 'xyz', 'flx', 'vntl', 'km') THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
             ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
           END as avg_funding_rate_annual,
           MIN(CAST(funding_rate AS REAL)) as min_funding_rate,
@@ -895,7 +937,15 @@ async function aggregateTo1Hour(env: Env): Promise<void> {
       SELECT
         exchange,
         symbol,
-        normalized_symbol,
+        UPPER(
+          REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+            symbol,
+            'hyna:', ''), 'xyz:', ''), 'flx:', ''), 'vntl:', ''), 'km:', ''),
+            'HYNA:', ''), 'XYZ:', ''), 'FLX:', ''), 'VNTL:', ''), 'KM:', ''),
+            'edgex:', ''), 'EDGEX:', ''),
+            'aster:', ''), 'ASTER:', ''),
+            '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')
+        ) as normalized_symbol,
         -- Prices (weighted average)
         SUM(avg_mark_price * sample_count) / SUM(sample_count) as avg_mark_price,
         SUM(avg_index_price * sample_count) / SUM(sample_count) as avg_index_price,

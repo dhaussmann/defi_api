@@ -13,7 +13,11 @@ bindings = [
   { name = "ASTER_TRACKER", class_name = "AsterTracker" },
   { name = "PACIFICA_TRACKER", class_name = "PacificaTracker" },
   { name = "EXTENDED_TRACKER", class_name = "ExtendedTracker" },
-  { name = "HYENA_TRACKER", class_name = "HyENATracker" }
+  { name = "HYENA_TRACKER", class_name = "HyENATracker" },
+  { name = "XYZ_TRACKER", class_name = "XYZTracker" },
+  { name = "FLX_TRACKER", class_name = "FLXTracker" },
+  { name = "VNTL_TRACKER", class_name = "VNTLTracker" },
+  { name = "KM_TRACKER", class_name = "KMTracker" }
 ]
 
 [[migrations]]
@@ -47,6 +51,10 @@ new_classes = ["ExtendedTracker"]
 [[migrations]]
 tag = "v8"
 new_classes = ["HyENATracker"]
+
+[[migrations]]
+tag = "v9"
+new_classes = ["XYZTracker", "FLXTracker", "VNTLTracker", "KMTracker"]
 
 # D1 Database
 [[d1_databases]]

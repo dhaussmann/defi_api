@@ -330,6 +330,10 @@ export interface Env {
   PACIFICA_TRACKER: DurableObjectNamespace;
   EXTENDED_TRACKER: DurableObjectNamespace;
   HYENA_TRACKER: DurableObjectNamespace;
+  XYZ_TRACKER: DurableObjectNamespace;
+  FLX_TRACKER: DurableObjectNamespace;
+  VNTL_TRACKER: DurableObjectNamespace;
+  KM_TRACKER: DurableObjectNamespace;
   DB: D1Database;
   SNAPSHOT_INTERVAL_MS?: string;
 }

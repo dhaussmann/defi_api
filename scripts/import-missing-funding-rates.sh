@@ -1,122 +1,94 @@
 #!/bin/bash
-
-# Import missing funding rate data from funding-rates-db to defiapi-db
-# This script fills gaps in historical funding rate data for:
-# - Hyperliquid: 1.1.2025 - 18.12.2025
-# - Aster: 1.1.2025 - 21.12.2025
-# - Paradex: 9.12.2025 - 18.12.2025
-
 set -e
 
-SOURCE_DB="funding-rates-db"
-TARGET_DB="defiapi-db"
+API_URL="https://api.hyperliquid.xyz/info"
+DB_NAME="defiapi-db"
+REMOTE="--remote"
 
-echo "=== Funding Rate Data Import ==="
-echo "Source DB: $SOURCE_DB"
-echo "Target DB: $TARGET_DB"
+COINS=("BTC" "ETH" "SOL")
+START_TIME=1764547200000  # Dec 1, 2025
+CURRENT_TIME=$(date +%s)
+END_TIME=$(( CURRENT_TIME * 1000 ))
+
+echo "=========================================="
+echo "HIP-3 DEX Historical Funding Import"
+echo "=========================================="
+echo "Coins: ${COINS[@]}"
+echo "Start: $(date -u -r $((START_TIME / 1000)))"
+echo "End:   $(date -u -r $((CURRENT_TIME)))"
 echo ""
 
-# Function to import data for one exchange
-import_exchange_data() {
-  local exchange=$1
-  local table_name=$2
-  local start_ms=$3
-  local end_ms=$4
-  local description=$5
-  local symbol_column=$6  # New parameter: column name for symbol (either 'symbol' or 'coin')
+TOTAL_IMPORTED=0
 
-  echo ">>> Processing $exchange ($description)"
-
-  # Export data from source DB
-  echo "  1. Exporting data from $SOURCE_DB..."
-  npx wrangler d1 execute "$SOURCE_DB" --remote --json \
-    --command "SELECT ${symbol_column} as symbol, funding_rate, collected_at FROM ${table_name} WHERE collected_at >= $start_ms AND collected_at < $end_ms ORDER BY collected_at" \
-    > /tmp/funding_export_${exchange}.json
-
-  # Check if data was exported
-  local count=$(cat /tmp/funding_export_${exchange}.json | jq -r '.[0].results | length')
-
-  if [ "$count" -eq 0 ]; then
-    echo "  ⚠️  No data found for $exchange in time range"
-    return
-  fi
-
-  echo "  ✓ Exported $count records"
-
-  # Convert to SQL INSERT statements
-  echo "  2. Converting to SQL format..."
-  cat /tmp/funding_export_${exchange}.json | jq -r '
-    .[0].results[] |
-    "INSERT OR IGNORE INTO funding_rate_history (exchange, symbol, trading_pair, funding_rate, funding_rate_percent, annualized_rate, collected_at) VALUES (" +
-    "\"'"$exchange"'\", " +
-    "\"" + .symbol + "\", " +
-    "\"" + .symbol + "\", " +
-    (.funding_rate | tostring) + ", " +
-    ((.funding_rate * 100) | tostring) + ", " +
-    ((.funding_rate * 100 * 3 * 365) | tostring) + ", " +
-    (.collected_at | tostring) +
-    ");"
-  ' > /tmp/funding_import_${exchange}.sql
-
-  local sql_lines=$(wc -l < /tmp/funding_import_${exchange}.sql | tr -d ' ')
-  echo "  ✓ Generated $sql_lines SQL statements"
-
-  # Split into batches of 1000 with numeric suffixes
-  echo "  3. Splitting into batches..."
-  split -l 1000 -d /tmp/funding_import_${exchange}.sql /tmp/funding_batch_${exchange}_
-
-  local batch_count=$(ls /tmp/funding_batch_${exchange}_* 2>/dev/null | wc -l | tr -d ' ')
-  echo "  ✓ Created $batch_count batches (1000 records each)"
-
-  # Import batches
-  echo "  4. Importing batches to $TARGET_DB..."
-  local batch_num=0
-  local imported=0
-  for batch_file in /tmp/funding_batch_${exchange}_*; do
-    batch_num=$((batch_num + 1))
-    local batch_size=$(wc -l < "$batch_file" | tr -d ' ')
-    echo "     Batch $batch_num/$batch_count ($batch_size records)..."
-
-    # Combine all statements into one command
-    local sql_batch=$(cat "$batch_file" | tr '\n' ' ')
-    npx wrangler d1 execute "$TARGET_DB" --remote --command "$sql_batch" > /dev/null 2>&1
-
-    imported=$((imported + batch_size))
-  done
-
-  echo "  ✅ Imported $imported records for $exchange"
-
-  # Cleanup
-  rm -f /tmp/funding_export_${exchange}.json
-  rm -f /tmp/funding_import_${exchange}.sql
-  rm -f /tmp/funding_batch_${exchange}_*
+for DEX_INFO in "flx:FLX:Felix" "vntl:VNTL:Ventures" "km:KM:Kinetiq"; do
+  IFS=':' read -r DEX EXCHANGE_CODE NAME <<< "$DEX_INFO"
 
   echo ""
-}
+  echo "=========================================="
+  echo "$NAME ($EXCHANGE_CODE)"
+  echo "=========================================="
 
-# Import Hyperliquid data (1.1.2025 - 16.12.2025 23:59)
-# Start: 1.1.2025 00:00 = 1735689600000ms
-# End: 17.12.2025 00:00 = 1765929600000ms
-# Note: Hyperliquid uses 'coin' column instead of 'symbol'
-import_exchange_data "hyperliquid" "hyperliquid_funding_history" 1735689600000 1765929600000 "1.1-16.12.2025" "coin"
+  for COIN in "${COINS[@]}"; do
+    echo "Processing $COIN..."
 
-# Import Aster data (1.1.2025 - 21.12.2025 14:59)
-# Start: 1.1.2025 00:00 = 1735689600000ms
-# End: 21.12.2025 15:00 = 1766340000000ms
-import_exchange_data "aster" "aster_funding_history" 1735689600000 1766340000000 "1.1-21.12.2025" "symbol"
+    RESPONSE=$(curl -s -X POST "$API_URL" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"type\": \"fundingHistory\",
+        \"coin\": \"$COIN\",
+        \"startTime\": $START_TIME,
+        \"endTime\": $END_TIME,
+        \"dex\": \"$DEX\"
+      }")
 
-# Import Paradex data (9.12.2025 - 18.12.2025 07:59)
-# Start: 9.12.2025 11:01 = 1765278087794ms (actual earliest data)
-# End: 18.12.2025 08:00 = 1766080000000ms
-import_exchange_data "paradex" "paradex_funding_history" 1765278087000 1766080000000 "9.12-18.12.2025" "symbol"
+    RECORD_COUNT=$(echo "$RESPONSE" | jq -e 'length' 2>/dev/null || echo "0")
+
+    if [ "$RECORD_COUNT" = "0" ] || [ "$RECORD_COUNT" = "null" ]; then
+      echo "  ✗ No data for $COIN"
+      continue
+    fi
+
+    echo "  ✓ Received $RECORD_COUNT records"
+    SQL_FILE=$(mktemp)
+
+    echo "$RESPONSE" | jq -c '.[]' | while IFS= read -r record; do
+      TIME=$(echo "$record" | jq -r '.time')
+      FUNDING_RATE=$(echo "$record" | jq -r '.fundingRate')
+
+      if [ "$TIME" = "null" ] || [ "$FUNDING_RATE" = "null" ]; then
+        continue
+      fi
+
+      TIME_SECONDS=$((TIME / 1000))
+      HOUR_TIMESTAMP=$(( (TIME_SECONDS / 3600) * 3600 ))
+      SYMBOL="${DEX}:${COIN}"
+      FUNDING_ANNUAL=$(echo "$FUNDING_RATE * 100 * 3 * 365" | bc -l)
+
+      cat >> "$SQL_FILE" <<SQL
+INSERT INTO market_history (exchange, symbol, normalized_symbol, hour_timestamp, avg_mark_price, avg_index_price, avg_funding_rate, avg_funding_rate_annual, min_price, max_price, price_volatility, volume_base, volume_quote, avg_open_interest, avg_open_interest_usd, max_open_interest_usd, min_funding_rate, max_funding_rate, sample_count, aggregated_at)
+VALUES ('$DEX', '$SYMBOL', '$COIN', $HOUR_TIMESTAMP, 0.0, 0.0, $FUNDING_RATE, $FUNDING_ANNUAL, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, $FUNDING_RATE, $FUNDING_RATE, 1, unixepoch('now'))
+ON CONFLICT(exchange, symbol, hour_timestamp) DO UPDATE SET avg_funding_rate = COALESCE(excluded.avg_funding_rate, avg_funding_rate);
+SQL
+    done
+
+    if [ -s "$SQL_FILE" ]; then
+      LINES=$(wc -l < "$SQL_FILE" | tr -d ' ')
+      echo "  📝 Importing $LINES SQL statements..."
+
+      npx wrangler d1 execute "$DB_NAME" $REMOTE --file="$SQL_FILE" > /dev/null 2>&1 && \
+        echo "  ✅ Import successful" || echo "  ⚠️  Import errors"
+
+      TOTAL_IMPORTED=$((TOTAL_IMPORTED + LINES))
+    fi
+
+    rm -f "$SQL_FILE"
+    sleep 0.5
+  done
+done
 
 echo ""
-echo "=== Import Complete ==="
-echo ""
-echo "Next steps:"
-echo "1. Verify imported data:"
-echo "   npx wrangler d1 execute $TARGET_DB --remote --command \"SELECT exchange, COUNT(*) as count, datetime(MIN(collected_at)/1000, 'unixepoch') as oldest, datetime(MAX(collected_at)/1000, 'unixepoch') as newest FROM funding_rate_history GROUP BY exchange ORDER BY exchange\""
-echo ""
-echo "2. Test the /api/funding-history endpoint:"
-echo "   curl 'https://defiapi.cloudflareone-demo-account.workers.dev/api/funding-history?symbol=BTC&exchange=hyperliquid&from=1735689600000&to=1735776000000&limit=100'"
-echo ""
+echo "=========================================="
+echo "Import Summary"
+echo "=========================================="
+echo "Total SQL statements: ~$TOTAL_IMPORTED"
+echo "Completed: $(date -u)"
