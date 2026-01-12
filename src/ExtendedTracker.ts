@@ -66,7 +66,7 @@ export class ExtendedTracker implements DurableObject {
 
   // Konfigurationskonstanten
   private readonly POLL_INTERVAL = 15000; // 15 Sekunden
-  private readonly SNAPSHOT_INTERVAL = 60000; // 60 Sekunden (1 Minute)
+  private readonly SNAPSHOT_INTERVAL = 15000; // 15 Sekunden (konsistent mit anderen Trackern)
   private readonly API_URL = 'https://api.starknet.extended.exchange/api/v1/info/markets';
 
   constructor(state: DurableObjectState, env: Env) {

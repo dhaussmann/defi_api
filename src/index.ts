@@ -777,17 +777,19 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
     const fiveMinutesAgo = Math.floor(Date.now() / 1000) - (5 * 60);
     const now = Math.floor(Date.now() / 1000);
 
-    // Check if there's data to aggregate
-    const oldestQuery = await env.DB.prepare(
+    // Get oldest timestamp from raw data
+    const oldestResult = await env.DB.prepare(
       'SELECT MIN(created_at) as oldest FROM market_stats WHERE created_at < ?'
-    ).bind(fiveMinutesAgo).first<{ oldest: number }>();
+    ).bind(fiveMinutesAgo).first<{ oldest: number | null }>();
 
-    if (!oldestQuery || !oldestQuery.oldest) {
-      console.log('[Cron] No 15s data to aggregate to 1m');
+    if (!oldestResult?.oldest) {
+      console.log('[Cron] No data to aggregate');
       return;
     }
 
-    const oldestTimestamp = oldestQuery.oldest;
+    // Use the oldest available raw data timestamp (ignore gaps)
+    const oldestTimestamp = oldestResult.oldest;
+    console.log(`[Cron] Starting aggregation from ${new Date(oldestTimestamp * 1000).toISOString()} (ignoring any gaps)`);
     console.log(`[Cron] Found data from ${new Date(oldestTimestamp * 1000).toISOString()} to aggregate`);
 
     // Process in 1-hour batches to avoid memory issues
@@ -796,7 +798,7 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
     let totalAggregated = 0;
     let totalDeleted = 0;
     let batchCount = 0;
-    const maxBatches = 3; // Limit to 3 hours of data per run (reduced from 10 to handle backlog)
+    const maxBatches = 50; // Limit to 50 hours of data per run (increased to clear backlog)
 
     while (batchStart < fiveMinutesAgo && batchCount < maxBatches) {
       const batchEnd = Math.min(batchStart + batchSize, fiveMinutesAgo);
@@ -816,15 +818,13 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
         SELECT
           exchange,
           symbol,
-          UPPER(
-            REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+          REPLACE(REPLACE(REPLACE(
+            UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
               symbol,
-              'hyna:', ''), 'xyz:', ''), 'flx:', ''), 'vntl:', ''), 'km:', ''),
-              'HYNA:', ''), 'XYZ:', ''), 'FLX:', ''), 'VNTL:', ''), 'KM:', ''),
-              'edgex:', ''), 'EDGEX:', ''),
-              'aster:', ''), 'ASTER:', ''),
-              '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')
-          ) as normalized_symbol,
+              'xyz:', ''), 'hyna:', ''), 'flx:', ''), 'vntl:', ''), 'km:', ''),
+              'edgex:', ''), 'aster:', '')),
+            '-USD-PERP', ''), '-USD', ''), 'USDT', '')
+          as normalized_symbol,
           -- Prices
           AVG(CAST(mark_price AS REAL)) as avg_mark_price,
           AVG(CAST(index_price AS REAL)) as avg_index_price,

@@ -300,8 +300,9 @@ export class HyENATracker implements DurableObject {
         const assetCtx = assetCtxs[i];
 
         if (universeItem && assetCtx && universeItem.name) {
-          // Symbol mit hyna: Prefix versehen
-          const symbol = `hyna:${universeItem.name}`;
+          // Symbol mit hyna: Prefix versehen (nur wenn nicht bereits vorhanden)
+          const rawSymbol = universeItem.name;
+          const symbol = rawSymbol.startsWith('hyna:') ? rawSymbol : `hyna:${rawSymbol}`;
           this.dataBuffer.set(symbol, { universe: universeItem, assetCtx });
         }
       }
