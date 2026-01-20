@@ -257,9 +257,18 @@ async function handleApiRoute(
       return await getBulkFundingMovingAverages(env, url, corsHeaders);
     case '/api/admin/cache-ma':
       // Temporary endpoint to manually trigger MA cache calculation
+      // Query param: all=true to calculate all timeframes at once
       try {
-        await calculateAndCacheFundingMAs(env);
-        return Response.json({ success: true, message: 'MA cache calculation triggered' }, { headers: corsHeaders });
+        const calculateAll = url.searchParams.get('all') === 'true';
+        if (calculateAll) {
+          // Calculate all timeframes sequentially
+          const { calculateAllTimeframes } = await import('./maCache');
+          await calculateAllTimeframes(env);
+          return Response.json({ success: true, message: 'All timeframes calculated' }, { headers: corsHeaders });
+        } else {
+          await calculateAndCacheFundingMAs(env);
+          return Response.json({ success: true, message: 'MA cache calculation triggered' }, { headers: corsHeaders });
+        }
       } catch (error) {
         return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
       }
