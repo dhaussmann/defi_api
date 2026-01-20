@@ -12,6 +12,7 @@ import { VNTLTracker } from './VNTLTracker';
 import { KMTracker } from './KMTracker';
 import { Env, ApiResponse, MarketStatsQuery, MarketStatsRecord } from './types';
 import { calculateAllVolatilityMetrics } from './volatility';
+import { calculateAndCacheFundingMAs, getCachedFundingMAs } from './maCache';
 
 export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker };
 
@@ -20,7 +21,7 @@ export default {
     const cronType = event.cron || '*/5 * * * *'; // Default to 5-minute cron
     console.log(`[Cron] Scheduled event triggered: ${cronType} at ${new Date().toISOString()}`);
 
-    // Every 5 minutes: Health check + normalized_tokens update + 1-minute aggregation
+    // Every 5 minutes: Health check + normalized_tokens update + 1-minute aggregation + MA cache
     if (cronType === '*/5 * * * *') {
       try {
         console.log('[Cron] Running WebSocket health check');
@@ -31,6 +32,9 @@ export default {
 
         console.log('[Cron] Running 15s → 1m aggregation');
         await aggregateTo1Minute(env);
+
+        console.log('[Cron] Calculating and caching moving averages');
+        await calculateAndCacheFundingMAs(env);
 
         console.log('[Cron] 5-minute tasks completed successfully');
       } catch (error) {
@@ -251,6 +255,14 @@ async function handleApiRoute(
       return await getFundingMovingAverages(env, url, corsHeaders);
     case '/api/funding/ma/bulk':
       return await getBulkFundingMovingAverages(env, url, corsHeaders);
+    case '/api/admin/cache-ma':
+      // Temporary endpoint to manually trigger MA cache calculation
+      try {
+        await calculateAndCacheFundingMAs(env);
+        return Response.json({ success: true, message: 'MA cache calculation triggered' }, { headers: corsHeaders });
+      } catch (error) {
+        return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
+      }
     case '/api/data/24h':
       return await getData24h(env, url, corsHeaders);
     case '/api/data/7d':
@@ -1802,102 +1814,50 @@ async function getBulkFundingMovingAverages(
   try {
     // Optional: filter by specific exchanges
     const exchangesParam = url.searchParams.get('exchanges');
-    const exchanges = exchangesParam ? exchangesParam.split(',').map(e => e.trim().toLowerCase()) : null;
+    const exchanges = exchangesParam ? exchangesParam.split(',').map(e => e.trim().toLowerCase()) : undefined;
     
     // Optional: filter by specific symbols
     const symbolsParam = url.searchParams.get('symbols');
-    const symbols = symbolsParam ? symbolsParam.split(',').map(s => s.trim().toUpperCase()) : null;
+    const symbols = symbolsParam ? symbolsParam.split(',').map(s => s.trim().toUpperCase()) : undefined;
     
     // Optional: specify timeframes (default: all)
     const timeframesParam = url.searchParams.get('timeframes');
-    const requestedTimeframes = timeframesParam ? timeframesParam.split(',').map(t => t.trim()) : ['24h', '3d', '7d', '14d', '30d'];
+    const requestedTimeframes = timeframesParam ? timeframesParam.split(',').map(t => t.trim()) : undefined;
     
-    const nowSeconds = Math.floor(Date.now() / 1000);
+    // Fetch pre-calculated data from cache
+    const cachedData = await getCachedFundingMAs(env, exchanges, symbols, requestedTimeframes);
     
-    // Define all available time periods
-    const allPeriods: Record<string, number> = {
-      '24h': 24 * 60 * 60,
-      '3d': 3 * 24 * 60 * 60,
-      '7d': 7 * 24 * 60 * 60,
-      '14d': 14 * 24 * 60 * 60,
-      '30d': 30 * 24 * 60 * 60,
-    };
-    
-    // Filter to requested timeframes
-    const periods: Record<string, number> = {};
-    for (const tf of requestedTimeframes) {
-      if (allPeriods[tf]) {
-        periods[tf] = allPeriods[tf];
-      }
-    }
-    
-    // Use a simpler approach: one query per timeframe but all symbols/exchanges at once
-    // This is much more efficient than the original N*M approach
+    // Transform cached data into the expected format
     const results: Map<string, any> = new Map();
     
-    // Build WHERE clause for filtering
-    let whereClause = 'WHERE 1=1';
-    const filterParams: any[] = [];
-    
-    if (exchanges && exchanges.length > 0) {
-      const placeholders = exchanges.map(() => '?').join(',');
-      whereClause += ` AND exchange IN (${placeholders})`;
-      filterParams.push(...exchanges);
-    }
-    
-    if (symbols && symbols.length > 0) {
-      const placeholders = symbols.map(() => '?').join(',');
-      whereClause += ` AND normalized_symbol IN (${placeholders})`;
-      filterParams.push(...symbols);
-    }
-    
-    // Execute one query per timeframe (much better than N*M queries)
-    for (const [periodName, periodSeconds] of Object.entries(periods)) {
-      const fromTimestamp = nowSeconds - periodSeconds;
+    for (const row of cachedData) {
+      const key = `${row.normalized_symbol}:${row.exchange}`;
       
-      const query = `
-        SELECT 
-          normalized_symbol,
-          exchange,
-          AVG(avg_funding_rate) as avg_funding_rate,
-          AVG(avg_funding_rate_annual) as avg_funding_rate_annual,
-          COUNT(*) as sample_count
-        FROM market_stats_1m
-        ${whereClause}
-          AND minute_timestamp >= ?
-          AND minute_timestamp <= ?
-          AND avg_funding_rate IS NOT NULL
-        GROUP BY normalized_symbol, exchange
-      `;
-      
-      const queryResult = await env.DB.prepare(query)
-        .bind(...filterParams, fromTimestamp, nowSeconds)
-        .all();
-      
-      if (queryResult.success && queryResult.results) {
-        for (const row of queryResult.results as any[]) {
-          const key = `${row.normalized_symbol}:${row.exchange}`;
-          
-          if (!results.has(key)) {
-            results.set(key, {
-              symbol: row.normalized_symbol,
-              exchange: row.exchange,
-              timeframes: {},
-            });
-          }
-          
-          const maData = results.get(key)!;
-          maData.timeframes[periodName] = {
-            avg_funding_rate: parseFloat((row.avg_funding_rate as number).toFixed(8)),
-            avg_funding_rate_annual: parseFloat((row.avg_funding_rate_annual as number).toFixed(4)),
-            sample_count: row.sample_count,
-          };
-        }
+      if (!results.has(key)) {
+        results.set(key, {
+          symbol: row.normalized_symbol,
+          exchange: row.exchange,
+          timeframes: {},
+        });
       }
+      
+      const maData = results.get(key)!;
+      maData.timeframes[row.timeframe] = {
+        avg_funding_rate: parseFloat((row.avg_funding_rate as number).toFixed(8)),
+        avg_funding_rate_annual: parseFloat((row.avg_funding_rate_annual as number).toFixed(4)),
+        sample_count: row.sample_count,
+      };
     }
     
     // Convert Map to Array
     const resultsArray: any[] = Array.from(results.values());
+    
+    // Get list of timeframes from the data
+    const timeframesSet = new Set<string>();
+    for (const row of cachedData) {
+      timeframesSet.add(row.timeframe);
+    }
+    const timeframes = Array.from(timeframesSet).sort();
     
     // Calculate arbitrage opportunities (funding rate differences between exchanges for same token)
     const arbitrageOpportunities: any[] = [];
@@ -1916,8 +1876,8 @@ async function getBulkFundingMovingAverages(
       if (exchangeData.length < 2) continue; // Need at least 2 exchanges for arbitrage
       
       // For each timeframe, find the best arbitrage opportunity
-      for (const timeframe of Object.keys(periods)) {
-        const validExchanges = exchangeData.filter(e => e.timeframes[timeframe] !== null);
+      for (const timeframe of timeframes) {
+        const validExchanges = exchangeData.filter(e => e.timeframes[timeframe] !== null && e.timeframes[timeframe] !== undefined);
         
         if (validExchanges.length < 2) continue;
         
@@ -1964,7 +1924,7 @@ async function getBulkFundingMovingAverages(
         arbitrage: arbitrageOpportunities,
         meta: {
           total_combinations: resultsArray.length,
-          timeframes: Object.keys(periods),
+          timeframes: timeframes,
           exchanges_filter: exchanges || 'all',
           symbols_filter: symbols || 'all',
           arbitrage_opportunities: arbitrageOpportunities.length,
