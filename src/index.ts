@@ -1831,92 +1831,80 @@ async function getBulkFundingMovingAverages(
       }
     }
     
-    // Build query to get all unique symbol/exchange combinations
-    let symbolExchangeQuery = `
-      SELECT DISTINCT normalized_symbol, exchange
-      FROM market_stats_1m
-      WHERE 1=1
-    `;
+    // Use a simpler approach: one query per timeframe but all symbols/exchanges at once
+    // This is much more efficient than the original N*M approach
+    const results: Map<string, any> = new Map();
     
-    const symbolExchangeParams: any[] = [];
+    // Build WHERE clause for filtering
+    let whereClause = 'WHERE 1=1';
+    const filterParams: any[] = [];
     
     if (exchanges && exchanges.length > 0) {
       const placeholders = exchanges.map(() => '?').join(',');
-      symbolExchangeQuery += ` AND exchange IN (${placeholders})`;
-      symbolExchangeParams.push(...exchanges);
+      whereClause += ` AND exchange IN (${placeholders})`;
+      filterParams.push(...exchanges);
     }
     
     if (symbols && symbols.length > 0) {
       const placeholders = symbols.map(() => '?').join(',');
-      symbolExchangeQuery += ` AND normalized_symbol IN (${placeholders})`;
-      symbolExchangeParams.push(...symbols);
+      whereClause += ` AND normalized_symbol IN (${placeholders})`;
+      filterParams.push(...symbols);
     }
     
-    symbolExchangeQuery += ' ORDER BY normalized_symbol, exchange';
-    
-    const symbolExchangeResult = await env.DB.prepare(symbolExchangeQuery)
-      .bind(...symbolExchangeParams)
-      .all();
-    
-    if (!symbolExchangeResult.success || !symbolExchangeResult.results) {
-      throw new Error('Failed to fetch symbol/exchange combinations');
-    }
-    
-    const combinations = symbolExchangeResult.results as Array<{ normalized_symbol: string; exchange: string }>;
-    
-    // Calculate moving averages for each combination and timeframe
-    const results: any[] = [];
-    
-    for (const combo of combinations) {
-      const { normalized_symbol, exchange } = combo;
+    // Execute one query per timeframe (much better than N*M queries)
+    for (const [periodName, periodSeconds] of Object.entries(periods)) {
+      const fromTimestamp = nowSeconds - periodSeconds;
       
-      const maData: any = {
-        symbol: normalized_symbol,
-        exchange: exchange,
-        timeframes: {},
-      };
+      const query = `
+        SELECT 
+          normalized_symbol,
+          exchange,
+          AVG(avg_funding_rate) as avg_funding_rate,
+          AVG(avg_funding_rate_annual) as avg_funding_rate_annual,
+          COUNT(*) as sample_count
+        FROM market_stats_1m
+        ${whereClause}
+          AND minute_timestamp >= ?
+          AND minute_timestamp <= ?
+          AND avg_funding_rate IS NOT NULL
+        GROUP BY normalized_symbol, exchange
+      `;
       
-      // Calculate MA for each requested timeframe
-      for (const [periodName, periodSeconds] of Object.entries(periods)) {
-        const fromTimestamp = nowSeconds - periodSeconds;
-        
-        const query = `
-          SELECT 
-            AVG(avg_funding_rate) as avg_funding_rate,
-            AVG(avg_funding_rate_annual) as avg_funding_rate_annual,
-            COUNT(*) as sample_count
-          FROM market_stats_1m
-          WHERE normalized_symbol = ?
-            AND exchange = ?
-            AND minute_timestamp >= ?
-            AND minute_timestamp <= ?
-            AND avg_funding_rate IS NOT NULL
-        `;
-        
-        const queryResult = await env.DB.prepare(query)
-          .bind(normalized_symbol, exchange, fromTimestamp, nowSeconds)
-          .first();
-        
-        if (queryResult && queryResult.avg_funding_rate !== null) {
+      const queryResult = await env.DB.prepare(query)
+        .bind(...filterParams, fromTimestamp, nowSeconds)
+        .all();
+      
+      if (queryResult.success && queryResult.results) {
+        for (const row of queryResult.results as any[]) {
+          const key = `${row.normalized_symbol}:${row.exchange}`;
+          
+          if (!results.has(key)) {
+            results.set(key, {
+              symbol: row.normalized_symbol,
+              exchange: row.exchange,
+              timeframes: {},
+            });
+          }
+          
+          const maData = results.get(key)!;
           maData.timeframes[periodName] = {
-            avg_funding_rate: parseFloat((queryResult.avg_funding_rate as number).toFixed(8)),
-            avg_funding_rate_annual: parseFloat((queryResult.avg_funding_rate_annual as number).toFixed(4)),
-            sample_count: queryResult.sample_count,
+            avg_funding_rate: parseFloat((row.avg_funding_rate as number).toFixed(8)),
+            avg_funding_rate_annual: parseFloat((row.avg_funding_rate_annual as number).toFixed(4)),
+            sample_count: row.sample_count,
           };
-        } else {
-          maData.timeframes[periodName] = null;
         }
       }
-      
-      results.push(maData);
     }
+    
+    // Convert Map to Array
+    const resultsArray: any[] = Array.from(results.values());
     
     // Calculate arbitrage opportunities (funding rate differences between exchanges for same token)
     const arbitrageOpportunities: any[] = [];
     
     // Group results by symbol
     const bySymbol = new Map<string, any[]>();
-    for (const result of results) {
+    for (const result of resultsArray) {
       if (!bySymbol.has(result.symbol)) {
         bySymbol.set(result.symbol, []);
       }
@@ -1972,10 +1960,10 @@ async function getBulkFundingMovingAverages(
     return Response.json(
       {
         success: true,
-        data: results,
+        data: resultsArray,
         arbitrage: arbitrageOpportunities,
         meta: {
-          total_combinations: results.length,
+          total_combinations: resultsArray.length,
           timeframes: Object.keys(periods),
           exchanges_filter: exchanges || 'all',
           symbols_filter: symbols || 'all',
