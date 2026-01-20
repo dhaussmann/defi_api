@@ -1,0 +1,988 @@
+openapi: 3.0.3
+info:
+  title: DeFi Funding Rate API
+  description: |
+    API for aggregated funding rate data from multiple decentralized perpetual futures exchanges.
+    
+    **Supported Exchanges:**
+    - Hyperliquid (1h interval)
+    - Paradex (8h interval)
+    - EdgeX (4h interval)
+    - Lighter (1h interval)
+    - Aster (1h/4h/8h variable per token)
+    - Pacifica (1h interval)
+    - Extended (1h interval)
+    - HyENA (8h interval)
+    - XYZ (8h interval)
+    - FLX (8h interval)
+    - VNTL (8h interval)
+    - KM (8h interval)
+    
+    **Base URL:** `https://defiapi.cloudflareone-demo-account.workers.dev`
+    
+    **Custom Domain:** `https://api.fundingrate.de`
+  version: 1.0.0
+  contact:
+    name: API Support
+    url: https://fundingrate.de
+
+servers:
+  - url: https://defiapi.cloudflareone-demo-account.workers.dev
+    description: Production server
+  - url: https://api.fundingrate.de
+    description: Custom domain
+
+tags:
+  - name: Markets
+    description: Current market data and funding rates
+  - name: Historical
+    description: Historical market data and time-series
+  - name: Comparison
+    description: Cross-exchange comparison endpoints
+  - name: Status
+    description: System status and health monitoring
+  - name: Admin
+    description: Administrative endpoints (restricted)
+
+paths:
+  /api/markets:
+    get:
+      tags:
+        - Markets
+      summary: Get all current market data
+      description: |
+        Returns current market data for all exchanges and tokens.
+        Includes funding rates (original, hourly normalized, and annual APR).
+      parameters:
+        - name: exchange
+          in: query
+          description: Filter by exchange name
+          schema:
+            type: string
+            enum: [aster, edgex, extended, flx, hyena, hyperliquid, km, lighter, pacifica, paradex, vntl, xyz]
+        - name: symbol
+          in: query
+          description: Filter by normalized symbol (e.g., BTC, ETH)
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarketsResponse'
+              example:
+                success: true
+                data:
+                  - symbol: BTC
+                    exchange: hyperliquid
+                    original_symbol: BTC
+                    mark_price: 93167.5
+                    index_price: 93150.2
+                    open_interest_usd: 1234567890.5
+                    volume_24h: 987654321.0
+                    funding_rate: 0.0000054075
+                    funding_rate_hourly: 0.00000067594
+                    funding_rate_annual: 0.59212125
+                    next_funding_time: null
+                    price_change_24h: -0.0234
+                    price_low_24h: 92500.0
+                    price_high_24h: 94000.0
+                    volatility_24h: 2.5
+                    volatility_7d: 5.8
+                    atr_14: 1500.0
+                    bb_width: 0.025
+                    timestamp: "2026-01-19 10:06:41"
+                meta:
+                  count: 1
+                  filters:
+                    exchange: null
+                    symbol: null
+                    limit: 100
+
+  /api/compare:
+    get:
+      tags:
+        - Comparison
+      summary: Compare token across exchanges
+      description: Returns funding rates and market data for a specific token across all available exchanges
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          description: Normalized symbol to compare (e.g., BTC, ETH)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompareResponse'
+        '400':
+          description: Missing required parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/tokens:
+    get:
+      tags:
+        - Markets
+      summary: Get all available tokens
+      description: Returns a list of all normalized token symbols available across all exchanges
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: string
+                  meta:
+                    type: object
+                    properties:
+                      count:
+                        type: integer
+              example:
+                success: true
+                data: ["BTC", "ETH", "SOL", "HYPE", "DOGE"]
+                meta:
+                  count: 5
+
+  /api/normalized-data:
+    get:
+      tags:
+        - Historical
+      summary: Get normalized historical data
+      description: |
+        Flexible historical data query with multiple interval options.
+        Supports smart symbol resolution (handles variations like 1000PEPE, kPEPE).
+      parameters:
+        - name: exchange
+          in: query
+          description: Filter by exchange
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          description: Normalized symbol (e.g., BTC, PEPE)
+          schema:
+            type: string
+        - name: interval
+          in: query
+          description: Data interval
+          schema:
+            type: string
+            enum: [15s, 1m, 1h]
+            default: 1h
+        - name: from
+          in: query
+          description: Start timestamp (Unix epoch)
+          schema:
+            type: integer
+        - name: to
+          in: query
+          description: End timestamp (Unix epoch)
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            default: 168
+            minimum: 1
+            maximum: 10000
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NormalizedDataResponse'
+
+  /api/market-history:
+    get:
+      tags:
+        - Historical
+      summary: Get market history
+      description: Returns hourly historical market data for a specific exchange and symbol
+      parameters:
+        - name: exchange
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          required: true
+          description: Original symbol (exchange-specific format)
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: integer
+        - name: to
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 168
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarketHistoryResponse'
+
+  /api/funding-history:
+    get:
+      tags:
+        - Historical
+      summary: Get funding rate history
+      description: Returns historical funding rate data
+      parameters:
+        - name: exchange
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: integer
+        - name: to
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 168
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FundingHistoryResponse'
+
+  /api/data/24h:
+    get:
+      tags:
+        - Historical
+      summary: Get last 24 hours of data
+      description: Quick access endpoint for 24h historical data
+      parameters:
+        - name: exchange
+          in: query
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NormalizedDataResponse'
+
+  /api/data/7d:
+    get:
+      tags:
+        - Historical
+      summary: Get last 7 days of data
+      description: Quick access endpoint for 7d historical data
+      parameters:
+        - name: exchange
+          in: query
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NormalizedDataResponse'
+
+  /api/data/30d:
+    get:
+      tags:
+        - Historical
+      summary: Get last 30 days of data
+      description: Quick access endpoint for 30d historical data
+      parameters:
+        - name: exchange
+          in: query
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NormalizedDataResponse'
+
+  /api/volatility:
+    get:
+      tags:
+        - Markets
+      summary: Get volatility metrics
+      description: Returns volatility indicators (24h, 7d, ATR-14, Bollinger Band width)
+      parameters:
+        - name: exchange
+          in: query
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolatilityResponse'
+
+  /api/funding/ma:
+    get:
+      tags:
+        - Historical
+      summary: Get funding rate moving averages
+      description: Returns moving averages of funding rates
+      parameters:
+        - name: exchange
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: period
+          in: query
+          description: MA period in hours
+          schema:
+            type: integer
+            default: 24
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MovingAverageResponse'
+
+  /api/funding/ma/bulk:
+    get:
+      tags:
+        - Historical
+      summary: Get bulk funding rate moving averages with arbitrage opportunities
+      description: |
+        Returns moving averages for all tokens and exchanges in a single call.
+        Includes arbitrage opportunity detection across exchanges.
+        
+        **Performance:** Optimized for bulk queries - returns all data in one request instead of multiple individual calls.
+        
+        **Arbitrage Detection:** Automatically identifies funding rate spreads > 0.1% APR between exchanges for the same token.
+      parameters:
+        - name: exchanges
+          in: query
+          description: Comma-separated list of exchanges to filter (e.g., "hyperliquid,edgex,hyena")
+          schema:
+            type: string
+          example: "hyperliquid,edgex,extended"
+        - name: symbols
+          in: query
+          description: Comma-separated list of symbols to filter (e.g., "BTC,ETH,SOL")
+          schema:
+            type: string
+          example: "BTC,ETH"
+        - name: timeframes
+          in: query
+          description: Comma-separated list of timeframes (24h,3d,7d,14d,30d)
+          schema:
+            type: string
+            default: "24h,3d,7d,14d,30d"
+          example: "24h,7d"
+      responses:
+        '200':
+          description: Successful response with bulk MA data and arbitrage opportunities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkMovingAverageResponse'
+              example:
+                success: true
+                data:
+                  - symbol: BTC
+                    exchange: hyperliquid
+                    timeframes:
+                      24h:
+                        avg_funding_rate: 0.00000541
+                        avg_funding_rate_annual: 0.59
+                        sample_count: 1440
+                      7d:
+                        avg_funding_rate: 0.00000623
+                        avg_funding_rate_annual: 0.68
+                        sample_count: 10080
+                  - symbol: BTC
+                    exchange: edgex
+                    timeframes:
+                      24h:
+                        avg_funding_rate: 0.00005771
+                        avg_funding_rate_annual: 12.64
+                        sample_count: 1440
+                arbitrage:
+                  - symbol: BTC
+                    timeframe: 24h
+                    long_exchange: hyperliquid
+                    short_exchange: edgex
+                    long_rate: 0.59
+                    short_rate: 12.64
+                    spread_apr: 12.05
+                    profit_potential: positive
+                meta:
+                  total_combinations: 825
+                  timeframes: ["24h", "3d", "7d", "14d", "30d"]
+                  exchanges_filter: all
+                  symbols_filter: all
+                  arbitrage_opportunities: 156
+
+  /api/status:
+    get:
+      tags:
+        - Status
+      summary: Get tracker status
+      description: Returns health status of all WebSocket trackers
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+  /api/trackers:
+    get:
+      tags:
+        - Status
+      summary: Get all trackers status
+      description: Detailed status information for all exchange trackers
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrackersResponse'
+
+  /tracker/{exchange}/status:
+    get:
+      tags:
+        - Status
+      summary: Get specific tracker status
+      description: Returns status of a specific exchange tracker
+      parameters:
+        - name: exchange
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [lighter, paradex, hyperliquid, edgex, aster, pacifica, extended, hyena, xyz, flx, vntl, km]
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrackerStatusResponse'
+
+components:
+  schemas:
+    MarketData:
+      type: object
+      properties:
+        symbol:
+          type: string
+          description: Normalized symbol
+          example: BTC
+        exchange:
+          type: string
+          description: Exchange name
+          example: hyperliquid
+        original_symbol:
+          type: string
+          description: Original exchange-specific symbol
+          example: BTC
+        mark_price:
+          type: number
+          format: double
+          description: Current mark price
+          example: 93167.5
+        index_price:
+          type: number
+          format: double
+          description: Index price
+          example: 93150.2
+        open_interest_usd:
+          type: number
+          format: double
+          description: Open interest in USD
+          example: 1234567890.5
+        volume_24h:
+          type: number
+          format: double
+          description: 24h trading volume
+          example: 987654321.0
+        funding_rate:
+          type: number
+          format: double
+          description: Original funding rate (exchange-specific interval)
+          example: 0.0000054075
+        funding_rate_hourly:
+          type: number
+          format: double
+          description: Normalized hourly funding rate
+          example: 0.00000067594
+        funding_rate_annual:
+          type: number
+          format: double
+          description: Annualized funding rate (APR in %)
+          example: 0.59212125
+        next_funding_time:
+          type: integer
+          format: int64
+          nullable: true
+          description: Next funding timestamp (milliseconds)
+          example: 1768820400000
+        price_change_24h:
+          type: number
+          format: double
+          description: 24h price change percentage
+          example: -0.0234
+        price_low_24h:
+          type: number
+          format: double
+          description: 24h low price
+          example: 92500.0
+        price_high_24h:
+          type: number
+          format: double
+          description: 24h high price
+          example: 94000.0
+        volatility_24h:
+          type: number
+          format: double
+          nullable: true
+          description: 24h volatility percentage
+          example: 2.5
+        volatility_7d:
+          type: number
+          format: double
+          nullable: true
+          description: 7d volatility percentage
+          example: 5.8
+        atr_14:
+          type: number
+          format: double
+          nullable: true
+          description: 14-period Average True Range
+          example: 1500.0
+        bb_width:
+          type: number
+          format: double
+          nullable: true
+          description: Bollinger Band width
+          example: 0.025
+        timestamp:
+          type: string
+          format: date-time
+          description: Data timestamp
+          example: "2026-01-19 10:06:41"
+
+    MarketsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/MarketData'
+        meta:
+          type: object
+          properties:
+            count:
+              type: integer
+            filters:
+              type: object
+              properties:
+                exchange:
+                  type: string
+                  nullable: true
+                symbol:
+                  type: string
+                  nullable: true
+                limit:
+                  type: integer
+
+    CompareResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/MarketData'
+        meta:
+          type: object
+          properties:
+            symbol:
+              type: string
+            exchanges_count:
+              type: integer
+
+    NormalizedDataPoint:
+      type: object
+      properties:
+        exchange:
+          type: string
+        symbol:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+        avg_mark_price:
+          type: number
+          format: double
+        avg_funding_rate:
+          type: number
+          format: double
+        funding_rate_annual:
+          type: number
+          format: double
+        avg_open_interest_usd:
+          type: number
+          format: double
+        volume_base:
+          type: number
+          format: double
+        volume_quote:
+          type: number
+          format: double
+        price_volatility:
+          type: number
+          format: double
+
+    NormalizedDataResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/NormalizedDataPoint'
+        meta:
+          type: object
+          properties:
+            interval:
+              type: string
+            count:
+              type: integer
+            from:
+              type: integer
+              nullable: true
+            to:
+              type: integer
+              nullable: true
+
+    MarketHistoryResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: integer
+              mark_price:
+                type: number
+              funding_rate:
+                type: number
+              open_interest_usd:
+                type: number
+              volume:
+                type: number
+
+    FundingHistoryResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: integer
+              funding_rate:
+                type: number
+              funding_rate_annual:
+                type: number
+
+    VolatilityResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+              exchange:
+                type: string
+              volatility_24h:
+                type: number
+                nullable: true
+              volatility_7d:
+                type: number
+                nullable: true
+              atr_14:
+                type: number
+                nullable: true
+              bb_width:
+                type: number
+                nullable: true
+
+    MovingAverageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: integer
+              ma:
+                type: number
+
+    BulkMovingAverageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+                description: Normalized symbol
+              exchange:
+                type: string
+                description: Exchange name
+              timeframes:
+                type: object
+                description: Moving averages for each timeframe
+                additionalProperties:
+                  type: object
+                  nullable: true
+                  properties:
+                    avg_funding_rate:
+                      type: number
+                      format: double
+                      description: Average funding rate (raw)
+                    avg_funding_rate_annual:
+                      type: number
+                      format: double
+                      description: Average APR (%)
+                    sample_count:
+                      type: integer
+                      description: Number of data points in calculation
+        arbitrage:
+          type: array
+          description: Detected arbitrage opportunities
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+                description: Token symbol
+              timeframe:
+                type: string
+                description: Timeframe for this opportunity
+              long_exchange:
+                type: string
+                description: Exchange to go long (receive funding)
+              short_exchange:
+                type: string
+                description: Exchange to go short (pay funding)
+              long_rate:
+                type: number
+                format: double
+                description: APR on long exchange
+              short_rate:
+                type: number
+                format: double
+                description: APR on short exchange
+              spread_apr:
+                type: number
+                format: double
+                description: APR spread (profit potential)
+              profit_potential:
+                type: string
+                enum: [positive, negative]
+                description: Direction of profit
+        meta:
+          type: object
+          properties:
+            total_combinations:
+              type: integer
+              description: Total symbol/exchange combinations
+            timeframes:
+              type: array
+              items:
+                type: string
+              description: Timeframes included
+            exchanges_filter:
+              type: string
+              description: Applied exchange filter
+            symbols_filter:
+              type: string
+              description: Applied symbol filter
+            arbitrage_opportunities:
+              type: integer
+              description: Number of arbitrage opportunities found
+
+    StatusResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [running, stopped, error]
+              last_update:
+                type: integer
+              message:
+                type: string
+                nullable: true
+
+    TrackersResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              exchange:
+                type: string
+              status:
+                type: string
+              connected:
+                type: boolean
+              last_update:
+                type: integer
+              markets_count:
+                type: integer
+
+    TrackerStatusResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            exchange:
+              type: string
+            status:
+              type: string
+            connected:
+              type: boolean
+            last_update:
+              type: integer
+            markets_count:
+              type: integer
+            error:
+              type: string
+              nullable: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "Missing required parameter: symbol"

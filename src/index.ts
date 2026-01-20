@@ -247,6 +247,10 @@ async function handleApiRoute(
       return await getVolatility(env, url, corsHeaders);
     case '/api/normalized-data':
       return await getNormalizedData(env, url, corsHeaders);
+    case '/api/funding/ma':
+      return await getFundingMovingAverages(env, url, corsHeaders);
+    case '/api/funding/ma/bulk':
+      return await getBulkFundingMovingAverages(env, url, corsHeaders);
     case '/api/data/24h':
       return await getData24h(env, url, corsHeaders);
     case '/api/data/7d':
@@ -401,6 +405,21 @@ async function handleApiRoute(
         );
       }
     default:
+      // Handle dynamic routes like /api/tokens/{symbol}/history
+      if (path.startsWith('/api/tokens/') && path.endsWith('/history')) {
+        const pathParts = path.split('/');
+        const symbol = pathParts[3]; // /api/tokens/{symbol}/history
+        
+        if (symbol) {
+          // Create a new URL with symbol as query parameter
+          const modifiedUrl = new URL(url.toString());
+          modifiedUrl.searchParams.set('symbol', symbol.toUpperCase());
+          
+          // Forward to getNormalizedData which supports both from and to parameters
+          return await getNormalizedData(env, modifiedUrl, corsHeaders);
+        }
+      }
+      
       return new Response('API endpoint not found', {
         status: 404,
         headers: corsHeaders,
@@ -441,18 +460,14 @@ function normalizeSymbol(symbol: string): string {
 /**
  * Calculate annualized funding rate based on exchange-specific payment frequencies
  *
- * Different exchanges have different funding rate intervals:
- * - Hyperliquid: API returns hourly rate (1/8 of 8h rate), paid 24x/day → multiply by 24 × 365 × 100
- * - Paradex: 1-hour intervals, paid 24x/day → multiply by 24 × 365 × 100
- * - EdgeX: 4-hour intervals, paid 6x/day → multiply by 6 × 365 × 100
- * - Lighter: 8-hour intervals, rate already in %, paid 3x/day → multiply by 3 × 365 only
- * - Others (Aster, Pacifica, Extended): 8-hour intervals, paid 3x/day → multiply by 3 × 365 × 100
- *
- * @param fundingRate - The funding rate from the exchange API (as decimal)
  * @param exchange - The exchange name
- * @returns Annual funding rate as a percentage
+ * @param intervalHours - Optional interval hours for exchanges with variable intervals
+ * @returns Object with hourly normalized rate and annual rate as percentage
  */
-function calculateAnnualFundingRate(fundingRate: number, exchange: string, intervalHours?: number): number {
+function calculateFundingRates(fundingRate: number, exchange: string, intervalHours?: number): { hourly: number; annual: number } {
+  let hours: number;
+  let isAlreadyPercent = false;
+
   switch (exchange.toLowerCase()) {
     case 'hyperliquid':
     case 'hyena':
@@ -460,46 +475,53 @@ function calculateAnnualFundingRate(fundingRate: number, exchange: string, inter
     case 'flx':
     case 'vntl':
     case 'km':
-      // Hyperliquid & HIP-3 DEXs (HyENA, XYZ, FLX, VNTL, KM): 8-hour intervals
-      // 3 payments/day × 365 days × 100 (to percentage)
-      return fundingRate * 3 * 365 * 100;
-
     case 'paradex':
-      // Paradex: 8-hour intervals (continuous accrual, 8h reference period)
-      // 3 payments/day × 365 days × 100 (to percentage)
-      return fundingRate * 3 * 365 * 100;
+      // 8-hour intervals
+      hours = 8;
+      break;
 
     case 'edgex':
-      // EdgeX: 4-hour intervals
-      // 6 payments/day × 365 days × 100 (to percentage)
-      return fundingRate * 6 * 365 * 100;
+      // 4-hour intervals
+      hours = 4;
+      break;
 
     case 'lighter':
-      // Lighter: 1-hour intervals, rate already in %
-      // 24 payments/day × 365 days (no × 100 because already in %)
-      return fundingRate * 24 * 365;
+      // 1-hour intervals, rate already in %
+      hours = 1;
+      isAlreadyPercent = true;
+      break;
 
     case 'aster':
-      // Aster: Variable intervals per token (1h, 4h, or 8h)
-      // Use provided intervalHours or fallback to 8h (most conservative)
-      if (intervalHours) {
-        const paymentsPerDay = 24 / intervalHours;
-        return fundingRate * paymentsPerDay * 365 * 100;
-      }
-      // Fallback: assume 8-hour intervals (most conservative)
-      return fundingRate * 3 * 365 * 100;
+      // Variable intervals per token (1h, 4h, or 8h)
+      hours = intervalHours || 8; // Fallback to 8h if not provided
+      break;
 
     case 'extended':
     case 'pacifica':
-      // Extended, Pacifica: 1-hour intervals
-      // 24 payments/day × 365 days × 100 (to percentage)
-      return fundingRate * 24 * 365 * 100;
+      // 1-hour intervals
+      hours = 1;
+      break;
 
     default:
       // Fallback: assume 8-hour intervals
-      // 3 payments/day × 365 days × 100 (to percentage)
-      return fundingRate * 3 * 365 * 100;
+      hours = 8;
+      break;
   }
+
+  // Normalize to hourly rate
+  const hourlyRate = fundingRate / hours;
+
+  // Calculate annual rate from hourly rate
+  // hourly × 24 hours/day × 365 days × 100 (to percentage)
+  // Exception: Lighter already provides rate in %, so no × 100
+  const annualRate = isAlreadyPercent 
+    ? hourlyRate * 24 * 365 
+    : hourlyRate * 24 * 365 * 100;
+
+  return {
+    hourly: hourlyRate,
+    annual: annualRate
+  };
 }
 
 /**
@@ -672,7 +694,7 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
         const normalizedSymbol = normalizeSymbol(row.symbol);
         const fundingRate = parseFloat(row.funding_rate || '0');
         const intervalHours = row.funding_interval_hours ? parseInt(row.funding_interval_hours) : undefined;
-        const fundingRateAnnual = calculateAnnualFundingRate(fundingRate, row.exchange, intervalHours);
+        const fundingRates = calculateFundingRates(fundingRate, row.exchange, intervalHours);
 
         // Log first few entries for debugging
         if (processedCount < 3) {
@@ -682,7 +704,8 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
             normalizedSymbol,
             fundingRate,
             intervalHours,
-            fundingRateAnnual,
+            fundingRateHourly: fundingRates.hourly,
+            fundingRateAnnual: fundingRates.annual,
             markPrice: row.mark_price,
           });
         }
@@ -691,15 +714,16 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
           env.DB.prepare(
             `INSERT INTO normalized_tokens (
               symbol, exchange, mark_price, index_price, open_interest_usd,
-              volume_24h, funding_rate, funding_rate_annual, next_funding_time,
+              volume_24h, funding_rate, funding_rate_hourly, funding_rate_annual, next_funding_time,
               price_change_24h, price_low_24h, price_high_24h, original_symbol, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol, exchange) DO UPDATE SET
               mark_price = excluded.mark_price,
               index_price = excluded.index_price,
               open_interest_usd = excluded.open_interest_usd,
               volume_24h = excluded.volume_24h,
               funding_rate = excluded.funding_rate,
+              funding_rate_hourly = excluded.funding_rate_hourly,
               funding_rate_annual = excluded.funding_rate_annual,
               next_funding_time = excluded.next_funding_time,
               price_change_24h = excluded.price_change_24h,
@@ -715,7 +739,8 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
             parseFloat(row.open_interest_usd || '0'),
             parseFloat(row.daily_base_token_volume || '0'),
             fundingRate,
-            fundingRateAnnual,
+            fundingRates.hourly,
+            fundingRates.annual,
             row.next_funding_time ? parseInt(row.next_funding_time) : null,
             parseFloat(row.daily_price_change || '0'),
             parseFloat(row.daily_price_low || '0'),
@@ -818,12 +843,12 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
         SELECT
           exchange,
           symbol,
-          REPLACE(REPLACE(REPLACE(
+          REPLACE(REPLACE(REPLACE(REPLACE(
             UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
               symbol,
               'xyz:', ''), 'hyna:', ''), 'flx:', ''), 'vntl:', ''), 'km:', ''),
               'edgex:', ''), 'aster:', '')),
-            '-USD-PERP', ''), '-USD', ''), 'USDT', '')
+            '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', '')
           as normalized_symbol,
           -- Prices
           AVG(CAST(mark_price AS REAL)) as avg_mark_price,
@@ -1212,6 +1237,7 @@ async function getAllMarkets(
         open_interest_usd,
         volume_24h,
         funding_rate,
+        funding_rate_hourly,
         funding_rate_annual,
         next_funding_time,
         price_change_24h,
@@ -1261,6 +1287,7 @@ async function getAllMarkets(
       open_interest_usd: row.open_interest_usd || 0,
       volume_24h: row.volume_24h || 0,
       funding_rate: row.funding_rate || 0,
+      funding_rate_hourly: row.funding_rate_hourly || 0,
       funding_rate_annual: row.funding_rate_annual || 0,
       next_funding_time: row.next_funding_time || null,
       price_change_24h: row.price_change_24h || 0,
@@ -1766,6 +1793,326 @@ async function getVolatility(
   }
 }
 
+// Get bulk funding rate moving averages for all tokens and exchanges
+async function getBulkFundingMovingAverages(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    // Optional: filter by specific exchanges
+    const exchangesParam = url.searchParams.get('exchanges');
+    const exchanges = exchangesParam ? exchangesParam.split(',').map(e => e.trim().toLowerCase()) : null;
+    
+    // Optional: filter by specific symbols
+    const symbolsParam = url.searchParams.get('symbols');
+    const symbols = symbolsParam ? symbolsParam.split(',').map(s => s.trim().toUpperCase()) : null;
+    
+    // Optional: specify timeframes (default: all)
+    const timeframesParam = url.searchParams.get('timeframes');
+    const requestedTimeframes = timeframesParam ? timeframesParam.split(',').map(t => t.trim()) : ['24h', '3d', '7d', '14d', '30d'];
+    
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    
+    // Define all available time periods
+    const allPeriods: Record<string, number> = {
+      '24h': 24 * 60 * 60,
+      '3d': 3 * 24 * 60 * 60,
+      '7d': 7 * 24 * 60 * 60,
+      '14d': 14 * 24 * 60 * 60,
+      '30d': 30 * 24 * 60 * 60,
+    };
+    
+    // Filter to requested timeframes
+    const periods: Record<string, number> = {};
+    for (const tf of requestedTimeframes) {
+      if (allPeriods[tf]) {
+        periods[tf] = allPeriods[tf];
+      }
+    }
+    
+    // Build query to get all unique symbol/exchange combinations
+    let symbolExchangeQuery = `
+      SELECT DISTINCT normalized_symbol, exchange
+      FROM market_stats_1m
+      WHERE 1=1
+    `;
+    
+    const symbolExchangeParams: any[] = [];
+    
+    if (exchanges && exchanges.length > 0) {
+      const placeholders = exchanges.map(() => '?').join(',');
+      symbolExchangeQuery += ` AND exchange IN (${placeholders})`;
+      symbolExchangeParams.push(...exchanges);
+    }
+    
+    if (symbols && symbols.length > 0) {
+      const placeholders = symbols.map(() => '?').join(',');
+      symbolExchangeQuery += ` AND normalized_symbol IN (${placeholders})`;
+      symbolExchangeParams.push(...symbols);
+    }
+    
+    symbolExchangeQuery += ' ORDER BY normalized_symbol, exchange';
+    
+    const symbolExchangeResult = await env.DB.prepare(symbolExchangeQuery)
+      .bind(...symbolExchangeParams)
+      .all();
+    
+    if (!symbolExchangeResult.success || !symbolExchangeResult.results) {
+      throw new Error('Failed to fetch symbol/exchange combinations');
+    }
+    
+    const combinations = symbolExchangeResult.results as Array<{ normalized_symbol: string; exchange: string }>;
+    
+    // Calculate moving averages for each combination and timeframe
+    const results: any[] = [];
+    
+    for (const combo of combinations) {
+      const { normalized_symbol, exchange } = combo;
+      
+      const maData: any = {
+        symbol: normalized_symbol,
+        exchange: exchange,
+        timeframes: {},
+      };
+      
+      // Calculate MA for each requested timeframe
+      for (const [periodName, periodSeconds] of Object.entries(periods)) {
+        const fromTimestamp = nowSeconds - periodSeconds;
+        
+        const query = `
+          SELECT 
+            AVG(avg_funding_rate) as avg_funding_rate,
+            AVG(avg_funding_rate_annual) as avg_funding_rate_annual,
+            COUNT(*) as sample_count
+          FROM market_stats_1m
+          WHERE normalized_symbol = ?
+            AND exchange = ?
+            AND minute_timestamp >= ?
+            AND minute_timestamp <= ?
+            AND avg_funding_rate IS NOT NULL
+        `;
+        
+        const queryResult = await env.DB.prepare(query)
+          .bind(normalized_symbol, exchange, fromTimestamp, nowSeconds)
+          .first();
+        
+        if (queryResult && queryResult.avg_funding_rate !== null) {
+          maData.timeframes[periodName] = {
+            avg_funding_rate: parseFloat((queryResult.avg_funding_rate as number).toFixed(8)),
+            avg_funding_rate_annual: parseFloat((queryResult.avg_funding_rate_annual as number).toFixed(4)),
+            sample_count: queryResult.sample_count,
+          };
+        } else {
+          maData.timeframes[periodName] = null;
+        }
+      }
+      
+      results.push(maData);
+    }
+    
+    // Calculate arbitrage opportunities (funding rate differences between exchanges for same token)
+    const arbitrageOpportunities: any[] = [];
+    
+    // Group results by symbol
+    const bySymbol = new Map<string, any[]>();
+    for (const result of results) {
+      if (!bySymbol.has(result.symbol)) {
+        bySymbol.set(result.symbol, []);
+      }
+      bySymbol.get(result.symbol)!.push(result);
+    }
+    
+    // Calculate arbitrage for each symbol across exchanges
+    for (const [symbol, exchangeData] of bySymbol.entries()) {
+      if (exchangeData.length < 2) continue; // Need at least 2 exchanges for arbitrage
+      
+      // For each timeframe, find the best arbitrage opportunity
+      for (const timeframe of Object.keys(periods)) {
+        const validExchanges = exchangeData.filter(e => e.timeframes[timeframe] !== null);
+        
+        if (validExchanges.length < 2) continue;
+        
+        // Find highest and lowest funding rates
+        let highest = validExchanges[0];
+        let lowest = validExchanges[0];
+        
+        for (const ex of validExchanges) {
+          const rate = ex.timeframes[timeframe].avg_funding_rate_annual;
+          if (rate > highest.timeframes[timeframe].avg_funding_rate_annual) {
+            highest = ex;
+          }
+          if (rate < lowest.timeframes[timeframe].avg_funding_rate_annual) {
+            lowest = ex;
+          }
+        }
+        
+        const spread = highest.timeframes[timeframe].avg_funding_rate_annual - 
+                      lowest.timeframes[timeframe].avg_funding_rate_annual;
+        
+        // Only include significant arbitrage opportunities (> 0.1% APR difference)
+        if (Math.abs(spread) > 0.1) {
+          arbitrageOpportunities.push({
+            symbol,
+            timeframe,
+            long_exchange: lowest.exchange,  // Go long (receive funding) on lower rate
+            short_exchange: highest.exchange, // Go short (pay funding) on higher rate
+            long_rate: lowest.timeframes[timeframe].avg_funding_rate_annual,
+            short_rate: highest.timeframes[timeframe].avg_funding_rate_annual,
+            spread_apr: parseFloat(spread.toFixed(4)),
+            profit_potential: spread > 0 ? 'positive' : 'negative',
+          });
+        }
+      }
+    }
+    
+    // Sort arbitrage opportunities by spread (highest first)
+    arbitrageOpportunities.sort((a, b) => Math.abs(b.spread_apr) - Math.abs(a.spread_apr));
+    
+    return Response.json(
+      {
+        success: true,
+        data: results,
+        arbitrage: arbitrageOpportunities,
+        meta: {
+          total_combinations: results.length,
+          timeframes: Object.keys(periods),
+          exchanges_filter: exchanges || 'all',
+          symbols_filter: symbols || 'all',
+          arbitrage_opportunities: arbitrageOpportunities.length,
+        },
+      } as ApiResponse,
+      { headers: corsHeaders }
+    );
+  } catch (error) {
+    console.error('[API] Error in getBulkFundingMovingAverages:', error);
+    return Response.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to calculate bulk moving averages',
+      } as ApiResponse,
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
+// Get funding rate moving averages for different time periods
+async function getFundingMovingAverages(
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const symbol = url.searchParams.get('symbol')?.toUpperCase();
+    const exchange = url.searchParams.get('exchange');
+
+    if (!symbol) {
+      return Response.json(
+        {
+          success: false,
+          error: 'Missing required parameter: symbol',
+        } as ApiResponse,
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    if (!exchange) {
+      return Response.json(
+        {
+          success: false,
+          error: 'Missing required parameter: exchange',
+        } as ApiResponse,
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // Smart symbol resolution: try multiple variations to find the token
+    const symbolVariations = [
+      symbol,
+      `1000${symbol}`,
+      `k${symbol}`,
+      `K${symbol}`,
+    ];
+
+    const findExistingSymbol = async (symbolToCheck: string): Promise<boolean> => {
+      const checkQuery = `
+        SELECT 1 FROM market_stats_1m 
+        WHERE normalized_symbol = ? AND exchange = ?
+        LIMIT 1
+      `;
+      const result = await env.DB.prepare(checkQuery).bind(symbolToCheck, exchange).first();
+      return result !== null;
+    };
+
+    let resolvedSymbol = symbol;
+    for (const variation of symbolVariations) {
+      if (await findExistingSymbol(variation)) {
+        resolvedSymbol = variation;
+        break;
+      }
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    
+    // Define time periods in seconds
+    const periods = {
+      '24h': 24 * 60 * 60,
+      '3d': 3 * 24 * 60 * 60,
+      '7d': 7 * 24 * 60 * 60,
+      '14d': 14 * 24 * 60 * 60,
+      '30d': 30 * 24 * 60 * 60,
+    };
+
+    const result: any = {
+      symbol: resolvedSymbol,
+      exchange,
+    };
+
+    // Calculate moving average for each period
+    for (const [periodName, periodSeconds] of Object.entries(periods)) {
+      const fromTimestamp = nowSeconds - periodSeconds;
+
+      // Query market_stats_1m for the period
+      const query = `
+        SELECT AVG(avg_funding_rate) as avg_funding_rate
+        FROM market_stats_1m
+        WHERE normalized_symbol = ?
+          AND exchange = ?
+          AND minute_timestamp >= ?
+          AND minute_timestamp <= ?
+          AND avg_funding_rate IS NOT NULL
+      `;
+
+      const queryResult = await env.DB.prepare(query)
+        .bind(resolvedSymbol, exchange, fromTimestamp, nowSeconds)
+        .first();
+
+      if (queryResult && queryResult.avg_funding_rate !== null) {
+        result[`ma${periodName}`] = parseFloat((queryResult.avg_funding_rate as number).toFixed(6));
+      } else {
+        result[`ma${periodName}`] = null;
+      }
+    }
+
+    return Response.json(
+      {
+        success: true,
+        data: result,
+      } as ApiResponse,
+      { headers: corsHeaders }
+    );
+  } catch (error) {
+    console.error('[API] Error in getFundingMovingAverages:', error);
+    return Response.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to calculate moving averages',
+      } as ApiResponse,
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
 // Get normalized data with flexible time range and aggregation
 async function getNormalizedData(
   env: Env,
@@ -1787,6 +2134,45 @@ async function getNormalizedData(
           error: 'Missing required parameter: symbol',
         } as ApiResponse,
         { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // Smart symbol resolution: find ALL matching variations to support tokens like PEPE
+    // that exist as both "1000PEPE" and "kPEPE" across different exchanges
+    const symbolVariations = [
+      symbol,                    // Original (e.g., "BTC" or "PEPE")
+      `1000${symbol}`,          // With 1000 prefix (e.g., "1000PEPE")
+      `k${symbol}`,             // With k prefix lowercase (e.g., "kPEPE")
+      `K${symbol}`,             // With K prefix uppercase (e.g., "KPEPE")
+    ];
+
+    // Function to check if a symbol exists in the database
+    const findExistingSymbol = async (symbolToCheck: string): Promise<boolean> => {
+      const checkQuery = `
+        SELECT 1 FROM market_stats_1m 
+        WHERE normalized_symbol = ? 
+        LIMIT 1
+      `;
+      const result = await env.DB.prepare(checkQuery).bind(symbolToCheck).first();
+      return result !== null;
+    };
+
+    // Find ALL symbol variations that exist (not just the first one)
+    const resolvedSymbols: string[] = [];
+    for (const variation of symbolVariations) {
+      if (await findExistingSymbol(variation)) {
+        resolvedSymbols.push(variation);
+      }
+    }
+
+    // If no variations found, return error
+    if (resolvedSymbols.length === 0) {
+      return Response.json(
+        {
+          success: false,
+          error: `No data found for symbol "${symbol}" in the specified time range`,
+        } as ApiResponse,
+        { status: 404, headers: corsHeaders }
       );
     }
 
@@ -1817,6 +2203,9 @@ async function getNormalizedData(
 
     let allData: any[] = [];
 
+    // Build IN clause for all resolved symbols
+    const symbolPlaceholders = resolvedSymbols.map(() => '?').join(', ');
+
     // Query 1: Hourly aggregated data from market_history
     // This is used for: (a) all 1h interval requests, or (b) data >= 7 days old for other intervals
     if (interval === '1h' || needsHistoricalData) {
@@ -1843,10 +2232,10 @@ async function getNormalizedData(
           sample_count,
           datetime(hour_timestamp, 'unixepoch') as timestamp_iso
         FROM market_history
-        WHERE normalized_symbol = ?
+        WHERE normalized_symbol IN (${symbolPlaceholders})
       `;
 
-      const historyParams: any[] = [symbol];
+      const historyParams: any[] = [...resolvedSymbols];
 
       if (exchange) {
         historyQuery += ` AND exchange = ?`;
@@ -1879,10 +2268,10 @@ async function getNormalizedData(
         let latestHourQuery = `
           SELECT MAX(hour_timestamp) as latest_hour
           FROM market_history
-          WHERE normalized_symbol = ?
+          WHERE normalized_symbol IN (${symbolPlaceholders})
         `;
 
-        const latestHourParams: any[] = [symbol];
+        const latestHourParams: any[] = [...resolvedSymbols];
 
         if (exchange) {
           latestHourQuery += ` AND exchange = ?`;
@@ -1918,10 +2307,10 @@ async function getNormalizedData(
                 MAX(max_funding_rate) as max_funding_rate,
                 SUM(sample_count) as sample_count
               FROM market_stats_1m
-              WHERE normalized_symbol = ?
+              WHERE normalized_symbol IN (${symbolPlaceholders})
           `;
 
-          const recentHourlyParams: any[] = [symbol];
+          const recentHourlyParams: any[] = [...resolvedSymbols];
 
           if (exchange) {
             recentHourlyQuery += ` AND exchange = ?`;
@@ -1992,10 +2381,10 @@ async function getNormalizedData(
           1 as sample_count,
           datetime(CAST(collected_at / 1000 AS INTEGER), 'unixepoch') as timestamp_iso
         FROM funding_rate_history
-        WHERE symbol = ?
+        WHERE symbol IN (${symbolPlaceholders})
       `;
 
-      const fundingHistoryParams: any[] = [symbol];
+      const fundingHistoryParams: any[] = [...resolvedSymbols];
 
       if (exchange) {
         fundingHistoryQuery += ` AND exchange = ?`;
@@ -2045,10 +2434,10 @@ async function getNormalizedData(
           1 as sample_count,
           datetime(created_at, 'unixepoch') as timestamp_iso
         FROM market_stats
-        WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) = ?
+        WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) IN (${symbolPlaceholders})
       `;
 
-      const statsParams: any[] = [symbol];
+      const statsParams: any[] = [...resolvedSymbols];
 
       if (exchange) {
         statsQuery += ` AND exchange = ?`;
@@ -2081,6 +2470,8 @@ async function getNormalizedData(
         '1h': 60 * 60,
         '4h': 4 * 60 * 60,
         '1d': 24 * 60 * 60,
+        '7d': 7 * 24 * 60 * 60,
+        '30d': 30 * 24 * 60 * 60,
       };
 
       const bucketSize = intervalSeconds[interval];
@@ -2088,7 +2479,7 @@ async function getNormalizedData(
         return Response.json(
           {
             success: false,
-            error: 'Invalid interval. Use: raw, 15m, 1h, 4h, 1d',
+            error: 'Invalid interval. Use: raw, 15m, 1h, 4h, 1d, 7d, 30d',
           } as ApiResponse,
           { status: 400, headers: corsHeaders }
         );
@@ -2117,10 +2508,10 @@ async function getNormalizedData(
             MAX(CAST(funding_rate AS REAL)) as max_funding_rate,
             COUNT(*) as sample_count
           FROM market_stats
-          WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) = ?
+          WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(symbol, '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', ''), '1000', ''), 'k', '')) IN (${symbolPlaceholders})
       `;
 
-      const aggregatedParams: any[] = [bucketSize, symbol];
+      const aggregatedParams: any[] = [bucketSize, ...resolvedSymbols];
 
       if (exchange) {
         aggregatedQuery += ` AND exchange = ?`;
