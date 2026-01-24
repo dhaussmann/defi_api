@@ -2103,24 +2103,20 @@ async function getNormalizedData(
       `K${symbol}`,             // With K prefix uppercase (e.g., "KPEPE")
     ];
 
-    // Function to check if a symbol exists in the database
-    const findExistingSymbol = async (symbolToCheck: string): Promise<boolean> => {
-      const checkQuery = `
-        SELECT 1 FROM market_stats_1m 
-        WHERE normalized_symbol = ? 
-        LIMIT 1
-      `;
-      const result = await env.DB.prepare(checkQuery).bind(symbolToCheck).first();
-      return result !== null;
-    };
-
-    // Find ALL symbol variations that exist (not just the first one)
-    const resolvedSymbols: string[] = [];
-    for (const variation of symbolVariations) {
-      if (await findExistingSymbol(variation)) {
-        resolvedSymbols.push(variation);
-      }
-    }
+    // Find ALL symbol variations that exist in a single query (optimized to prevent DB overload)
+    const symbolCheckQuery = `
+      SELECT DISTINCT normalized_symbol 
+      FROM market_stats_1m 
+      WHERE normalized_symbol IN (?, ?, ?, ?)
+      LIMIT 4
+    `;
+    const symbolCheckResult = await env.DB.prepare(symbolCheckQuery)
+      .bind(...symbolVariations)
+      .all();
+    
+    const resolvedSymbols: string[] = symbolCheckResult.success && symbolCheckResult.results
+      ? symbolCheckResult.results.map((row: any) => row.normalized_symbol)
+      : [];
 
     // If no variations found, return error
     if (resolvedSymbols.length === 0) {
