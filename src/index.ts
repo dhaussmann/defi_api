@@ -1372,7 +1372,7 @@ async function getFundingRateHistory(
     const from = url.searchParams.get('from'); // Timestamp in milliseconds
     const to = url.searchParams.get('to'); // Timestamp in milliseconds
     const interval = url.searchParams.get('interval') || '1h'; // 1h, 4h, 1d
-    const limit = parseInt(url.searchParams.get('limit') || '1000');
+    const limit = parseInt(url.searchParams.get('limit') || '500'); // Reduced from 1000 to 500
 
     // Build query for funding_rate_history (imported historical data)
     let query1 = `
@@ -1407,7 +1407,7 @@ async function getFundingRateHistory(
     }
 
     query1 += ' ORDER BY collected_at ASC LIMIT ?';
-    params1.push(Math.min(limit, 10000)); // Max 10k records
+    params1.push(Math.min(limit, 5000)); // Reduced max from 10k to 5k to prevent timeouts
 
     // Build query for market_history (aggregated data from market_stats)
     let query2 = `
@@ -1443,7 +1443,7 @@ async function getFundingRateHistory(
     }
 
     query2 += ' ORDER BY hour_timestamp ASC LIMIT ?';
-    params2.push(Math.min(limit, 10000));
+    params2.push(Math.min(limit, 5000)); // Reduced max from 10k to 5k to prevent timeouts
 
     // Execute both queries in parallel
     const [result1, result2] = await Promise.all([
@@ -1473,7 +1473,7 @@ async function getFundingRateHistory(
         seenTimestamps.add(key);
         return true;
       })
-      .slice(0, Math.min(limit, 10000))
+      .slice(0, Math.min(limit, 5000))
       .map((row: any) => ({
         exchange: row.exchange,
         symbol: row.symbol,
