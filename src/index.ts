@@ -2131,6 +2131,21 @@ async function getNormalizedData(
 
     const nowSeconds = Math.floor(Date.now() / 1000);
     const sevenDaysAgo = nowSeconds - (7 * 24 * 60 * 60);
+    
+    // Early validation: reject requests for very large time ranges to prevent DB overload
+    const maxTimeRange = 30 * 24 * 60 * 60; // 30 days
+    if (from && to) {
+      const requestedRange = Math.abs(parseInt(to) - parseInt(from));
+      if (requestedRange > maxTimeRange) {
+        return Response.json(
+          {
+            success: false,
+            error: `Time range too large. Maximum allowed: 30 days. Requested: ${Math.floor(requestedRange / 86400)} days`,
+          } as ApiResponse,
+          { status: 400, headers: corsHeaders }
+        );
+      }
+    }
 
     let fromTimestamp: number;
     let toTimestamp: number;
@@ -2234,8 +2249,8 @@ async function getNormalizedData(
         const latestHourResult = await env.DB.prepare(latestHourQuery).bind(...latestHourParams).first();
         const latestAggregatedHour = (latestHourResult?.latest_hour as number) || 0;
 
-        // Only query market_stats_1m if there's a gap between the latest aggregated hour and the requested toTimestamp
-        if (latestAggregatedHour < toTimestamp) {
+        // Only query market_stats_1m if there's a significant gap (>1 hour) to avoid unnecessary queries
+        if (latestAggregatedHour > 0 && latestAggregatedHour < toTimestamp - 3600) {
           // Query market_stats_1m for the hours after the latest aggregated hour
           // Aggregate 1-minute data into hourly buckets
           let recentHourlyQuery = `
@@ -2309,60 +2324,8 @@ async function getNormalizedData(
         }
       }
 
-      // Query 1b: Also fetch imported historical funding rate data for gaps
-      // This covers data from Jan 1, 2025 onwards that might not be in market_history yet
-      let fundingHistoryQuery = `
-        SELECT
-          exchange,
-          trading_pair as original_symbol,
-          symbol as normalized_symbol,
-          NULL as mark_price,
-          NULL as index_price,
-          NULL as min_price,
-          NULL as max_price,
-          NULL as volatility,
-          NULL as volume_base,
-          NULL as volume_quote,
-          NULL as open_interest,
-          NULL as open_interest_usd,
-          NULL as max_open_interest_usd,
-          funding_rate,
-          annualized_rate as funding_rate_annual,
-          funding_rate as min_funding_rate,
-          funding_rate as max_funding_rate,
-          CAST(collected_at / 1000 AS INTEGER) as timestamp,
-          1 as sample_count,
-          datetime(CAST(collected_at / 1000 AS INTEGER), 'unixepoch') as timestamp_iso
-        FROM funding_rate_history
-        WHERE symbol IN (${symbolPlaceholders})
-      `;
-
-      const fundingHistoryParams: any[] = [...resolvedSymbols];
-
-      if (exchange) {
-        fundingHistoryQuery += ` AND exchange = ?`;
-        fundingHistoryParams.push(exchange);
-      }
-
-      fundingHistoryQuery += ` AND CAST(collected_at / 1000 AS INTEGER) >= ? AND CAST(collected_at / 1000 AS INTEGER) <= ?`;
-      // For 1h interval, use full time range; otherwise limit to data older than 7 days
-      fundingHistoryParams.push(fromTimestamp, interval === '1h' ? toTimestamp : Math.min(toTimestamp, sevenDaysAgo));
-
-      fundingHistoryQuery += ` ORDER BY collected_at DESC LIMIT ?`;
-      fundingHistoryParams.push(limit);
-
-      const fundingHistoryResult = await env.DB.prepare(fundingHistoryQuery).bind(...fundingHistoryParams).all();
-
-      if (fundingHistoryResult.success && fundingHistoryResult.results) {
-        // Add imported historical data
-        allData = allData.concat(
-          fundingHistoryResult.results.map((row: any) => ({
-            ...row,
-            data_source: 'imported',
-            interval: '1h',
-          }))
-        );
-      }
+      // Skip funding_rate_history query - table is typically empty and causes unnecessary DB load
+      // If needed in future, can be re-enabled with proper data population
     }
 
     // Query 2: Recent raw data (market_stats) for data < 7 days old
