@@ -2253,6 +2253,7 @@ async function getNormalizedData(
         if (latestAggregatedHour > 0 && latestAggregatedHour < toTimestamp - 3600) {
           // Query market_stats_1m for the hours after the latest aggregated hour
           // Aggregate 1-minute data into hourly buckets
+          // Optimized: Added LIMIT to reduce data processing
           let recentHourlyQuery = `
             WITH hourly_buckets AS (
               SELECT
@@ -2274,8 +2275,9 @@ async function getNormalizedData(
                 MIN(min_funding_rate) as min_funding_rate,
                 MAX(max_funding_rate) as max_funding_rate,
                 SUM(sample_count) as sample_count
-              FROM market_stats_1m
-              WHERE normalized_symbol IN (${symbolPlaceholders})
+              FROM (
+                SELECT * FROM market_stats_1m
+                WHERE normalized_symbol IN (${symbolPlaceholders})
           `;
 
           const recentHourlyParams: any[] = [...resolvedSymbols];
@@ -2293,7 +2295,12 @@ async function getNormalizedData(
           recentHourlyQuery += ` AND minute_timestamp <= ?`;
           recentHourlyParams.push(toTimestamp);
 
+          // Limit raw data to prevent excessive processing
+          recentHourlyQuery += ` ORDER BY minute_timestamp DESC LIMIT ?`;
+          recentHourlyParams.push(limit * 60); // limit hours × 60 minutes
+
           recentHourlyQuery += `
+              ) sub
               GROUP BY exchange, original_symbol, normalized_symbol, hour_timestamp
             )
             SELECT *,
@@ -2305,7 +2312,9 @@ async function getNormalizedData(
               datetime(hour_timestamp, 'unixepoch') as timestamp_iso
             FROM hourly_buckets
             ORDER BY hour_timestamp DESC
+            LIMIT ?
           `;
+          recentHourlyParams.push(limit);
 
           const recentHourlyResult = await env.DB.prepare(recentHourlyQuery).bind(...recentHourlyParams).all();
 
