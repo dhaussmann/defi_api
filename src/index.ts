@@ -1235,6 +1235,10 @@ async function getAvailableTokens(
   }
 }
 
+// In-memory cache for markets endpoint to prevent DB overload
+let marketsCache: { data: any; timestamp: number; key: string } | null = null;
+const MARKETS_CACHE_TTL = 10000; // 10 seconds
+
 // Get all markets from normalized_tokens table
 async function getAllMarkets(
   env: Env,
@@ -1245,6 +1249,16 @@ async function getAllMarkets(
   const exchange = url.searchParams.get('exchange');
   const symbol = url.searchParams.get('symbol');
   const limit = parseInt(url.searchParams.get('limit') || '1000');
+  
+  // Create cache key based on filters
+  const cacheKey = `${exchange || 'all'}_${symbol || 'all'}_${limit}`;
+  
+  // Check cache first
+  const now = Date.now();
+  if (marketsCache && marketsCache.key === cacheKey && (now - marketsCache.timestamp) < MARKETS_CACHE_TTL) {
+    console.log('[API] Returning cached markets data');
+    return Response.json(marketsCache.data, { headers: corsHeaders });
+  }
   
   try {
 
@@ -1322,20 +1336,26 @@ async function getAllMarkets(
       timestamp: row.timestamp,
     }));
 
-    return Response.json(
-      {
-        success: true,
-        data: markets,
-        meta: {
-          count: markets.length,
-          filters: {
-            exchange: exchange || 'all',
-            symbol: symbol || 'all',
-          },
+    const responseData = {
+      success: true,
+      data: markets,
+      meta: {
+        count: markets.length,
+        filters: {
+          exchange: exchange || 'all',
+          symbol: symbol || 'all',
         },
-      } as ApiResponse,
-      { headers: corsHeaders }
-    );
+      },
+    } as ApiResponse;
+    
+    // Update cache
+    marketsCache = {
+      data: responseData,
+      timestamp: Date.now(),
+      key: cacheKey
+    };
+    
+    return Response.json(responseData, { headers: corsHeaders });
   } catch (error) {
     console.error('[API] Error in getAllMarkets:', error);
     console.error('[API] Error details:', {
