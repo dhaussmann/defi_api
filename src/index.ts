@@ -1241,11 +1241,12 @@ async function getAllMarkets(
   url: URL,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
+  // Optional filters - declared outside try for error logging
+  const exchange = url.searchParams.get('exchange');
+  const symbol = url.searchParams.get('symbol');
+  const limit = parseInt(url.searchParams.get('limit') || '1000');
+  
   try {
-    // Optional filters
-    const exchange = url.searchParams.get('exchange');
-    const symbol = url.searchParams.get('symbol');
-    const limit = parseInt(url.searchParams.get('limit') || '1000');
 
     // Build query with optional filters (including volatility metrics)
     let query = `
@@ -1337,6 +1338,13 @@ async function getAllMarkets(
     );
   } catch (error) {
     console.error('[API] Error in getAllMarkets:', error);
+    console.error('[API] Error details:', {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      exchange,
+      symbol,
+      limit
+    });
     return Response.json(
       {
         success: false,
