@@ -1245,7 +1245,7 @@ async function getAvailableTokens(
 
 // In-memory cache for markets endpoint to prevent DB overload
 let marketsCache: { data: any; timestamp: number; key: string } | null = null;
-const MARKETS_CACHE_TTL = 10000; // 10 seconds
+const MARKETS_CACHE_TTL = 30000; // 30 seconds - increased due to ~1500 total markets
 
 // Get all markets from normalized_tokens table
 async function getAllMarkets(
@@ -1256,7 +1256,7 @@ async function getAllMarkets(
   // Optional filters - declared outside try for error logging
   const exchange = url.searchParams.get('exchange');
   const symbol = url.searchParams.get('symbol');
-  const limit = parseInt(url.searchParams.get('limit') || '1000');
+  const limit = parseInt(url.searchParams.get('limit') || '100'); // Default 100 to prevent DB overload
   
   // Create cache key based on filters
   const cacheKey = `${exchange || 'all'}_${symbol || 'all'}_${limit}`;
