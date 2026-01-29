@@ -10,11 +10,12 @@ import { XYZTracker } from './XYZTracker';
 import { FLXTracker } from './FLXTracker';
 import { VNTLTracker } from './VNTLTracker';
 import { KMTracker } from './KMTracker';
+import { VariationalTracker } from './VariationalTracker';
 import { Env, ApiResponse, MarketStatsQuery, MarketStatsRecord } from './types';
 import { calculateAllVolatilityMetrics } from './volatility';
 import { calculateAndCacheFundingMAs, getCachedFundingMAs } from './maCache';
 
-export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker };
+export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker, VariationalTracker };
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
@@ -198,6 +199,11 @@ async function handleTrackerRoute(
     doPath = path.replace('/tracker/km', '');
     const id = env.KM_TRACKER.idFromName('km-main');
     stub = env.KM_TRACKER.get(id);
+  } else if (path.startsWith('/tracker/variational/')) {
+    exchange = 'variational';
+    doPath = path.replace('/tracker/variational', '');
+    const id = env.VARIATIONAL_TRACKER.idFromName('variational-main');
+    stub = env.VARIATIONAL_TRACKER.get(id);
   } else {
     // Backward compatibility: /tracker/* routes to lighter
     exchange = 'lighter';
@@ -496,6 +502,7 @@ function calculateFundingRates(fundingRate: number, exchange: string, intervalHo
     case 'flx':
     case 'vntl':
     case 'km':
+    case 'variational':
     case 'paradex':
       // 8-hour intervals
       hours = 8;
@@ -573,6 +580,7 @@ async function checkTrackerHealth(env: Env): Promise<void> {
       { name: 'flx', binding: env.FLX_TRACKER },
       { name: 'vntl', binding: env.VNTL_TRACKER },
       { name: 'km', binding: env.KM_TRACKER },
+      { name: 'variational', binding: env.VARIATIONAL_TRACKER },
     ];
 
     const results: Array<{ name: string; status: string; action: string }> = [];

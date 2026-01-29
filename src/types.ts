@@ -334,6 +334,7 @@ export interface Env {
   FLX_TRACKER: DurableObjectNamespace;
   VNTL_TRACKER: DurableObjectNamespace;
   KM_TRACKER: DurableObjectNamespace;
+  VARIATIONAL_TRACKER: DurableObjectNamespace;
   DB: D1Database;
   SNAPSHOT_INTERVAL_MS?: string;
 }

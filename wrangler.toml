@@ -17,7 +17,8 @@ bindings = [
   { name = "XYZ_TRACKER", class_name = "XYZTracker" },
   { name = "FLX_TRACKER", class_name = "FLXTracker" },
   { name = "VNTL_TRACKER", class_name = "VNTLTracker" },
-  { name = "KM_TRACKER", class_name = "KMTracker" }
+  { name = "KM_TRACKER", class_name = "KMTracker" },
+  { name = "VARIATIONAL_TRACKER", class_name = "VariationalTracker" }
 ]
 
 [[migrations]]
@@ -55,6 +56,10 @@ new_classes = ["HyENATracker"]
 [[migrations]]
 tag = "v9"
 new_classes = ["XYZTracker", "FLXTracker", "VNTLTracker", "KMTracker"]
+
+[[migrations]]
+tag = "v10"
+new_classes = ["VariationalTracker"]
 
 # D1 Database
 [[d1_databases]]
