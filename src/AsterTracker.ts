@@ -455,7 +455,7 @@ export class AsterTracker implements DurableObject {
         );
       });
 
-      await this.env.DB.batch(insertStatements);
+      await this.env.DB_WRITE.batch(insertStatements);
       console.log(`[AsterTracker] Saved ${records.length} records to database`);
     } catch (error) {
       console.error('[AsterTracker] Failed to save snapshot to database:', error);

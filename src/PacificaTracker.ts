@@ -417,7 +417,7 @@ export class PacificaTracker implements DurableObject {
         );
       });
 
-      await this.env.DB.batch(insertStatements);
+      await this.env.DB_WRITE.batch(insertStatements);
       console.log(`[PacificaTracker] Saved ${records.length} records to database`);
     } catch (error) {
       console.error('[PacificaTracker] Failed to save snapshot to database:', error);

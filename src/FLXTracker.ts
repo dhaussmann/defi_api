@@ -423,7 +423,7 @@ export class FLXTracker implements DurableObject {
         )
       );
 
-      await this.env.DB.batch(batch);
+      await this.env.DB_WRITE.batch(batch);
 
       console.log(`[FLXTracker] ✅ Saved ${records.length} records to database`);
 

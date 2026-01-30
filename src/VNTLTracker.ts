@@ -423,7 +423,7 @@ export class VNTLTracker implements DurableObject {
         )
       );
 
-      await this.env.DB.batch(batch);
+      await this.env.DB_WRITE.batch(batch);
 
       console.log(`[VNTLTracker] ✅ Saved ${records.length} records to database`);
 

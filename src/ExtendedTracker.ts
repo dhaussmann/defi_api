@@ -356,7 +356,7 @@ export class ExtendedTracker implements DurableObject {
         );
       });
 
-      await this.env.DB.batch(insertStatements);
+      await this.env.DB_WRITE.batch(insertStatements);
       console.log(`[ExtendedTracker] Saved ${records.length} records to database`);
       console.log('[ExtendedTracker] ========== saveSnapshot() END SUCCESS ==========');
     } catch (error) {

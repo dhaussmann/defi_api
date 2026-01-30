@@ -420,7 +420,7 @@ export class HyperliquidTracker implements DurableObject {
         )
       );
 
-      await this.env.DB.batch(batch);
+      await this.env.DB_WRITE.batch(batch);
 
       console.log(`[HyperliquidTracker] Saved ${records.length} records to database`);
 

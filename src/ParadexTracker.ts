@@ -480,7 +480,7 @@ export class ParadexTracker implements DurableObject {
         )
       );
 
-      await this.env.DB.batch(batch);
+      await this.env.DB_WRITE.batch(batch);
 
       console.log(`[ParadexTracker] ✅ Saved ${records.length} records to database`);
 

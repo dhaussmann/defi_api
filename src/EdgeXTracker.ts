@@ -550,7 +550,7 @@ export class EdgeXTracker implements DurableObject {
         )
       );
 
-      await this.env.DB.batch(batch);
+      await this.env.DB_WRITE.batch(batch);
 
       console.log(`[EdgeXTracker] Saved snapshot with ${records.length} records`);
 
