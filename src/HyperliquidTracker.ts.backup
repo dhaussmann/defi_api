@@ -1,26 +1,24 @@
 import {
   Env,
+  HyperliquidMetaAndAssetCtxs,
+  HyperliquidUniverse,
+  HyperliquidAssetCtx,
   MarketStatsRecord,
 } from './types';
 
 /**
- * VariationalTracker - Durable Object für Variational Omni API-Datenabfrage
+ * HyperliquidTracker - Durable Object für API-basierte Datenabfrage
  *
- * Dieser Tracker verwendet API-Polling für Variational Omni
+ * Dieser Tracker verwendet API-Polling statt WebSocket-Verbindungen
  * und speichert Market-Statistiken in regelmäßigen Snapshots in die D1 Datenbank.
- *
- * API Details:
- * - Endpoint: GET https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats
- * - Funding Interval: 28800 seconds (8 hours)
- * - Funding Rate Format: Decimal (multiply by 100 for percentage)
- * - Rate Limits: 10 req/10s per IP, 1000 req/min global
  *
  * Hauptfunktionen:
  * - API-Polling alle 15 Sekunden (synchron mit Snapshot-Intervall)
  * - Zeitgesteuerte Abfragen um Timestamps auf :00, :15, :30, :45 zu erreichen
  * - Automatische Speicherung in Datenbank nach jedem Poll
+ * - Mapping von universe-Array zu assetCtxs-Array über Index
  */
-export class VariationalTracker implements DurableObject {
+export class HyperliquidTracker implements DurableObject {
   // Durable Object State und Environment
   private state: DurableObjectState;
   private env: Env;
@@ -30,7 +28,7 @@ export class VariationalTracker implements DurableObject {
   private statusCheckInterval: number | null = null;
 
   // Daten-Buffer
-  private dataBuffer: Map<string, any> = new Map();
+  private dataBuffer: Map<string, { universe: HyperliquidUniverse; assetCtx: HyperliquidAssetCtx }> = new Map();
 
   // Status-Variablen
   private isRunning = false;
@@ -40,7 +38,7 @@ export class VariationalTracker implements DurableObject {
 
   // Konfigurationskonstanten
   private readonly POLL_INTERVAL = 15000; // 15 Sekunden - synchron mit Snapshot-Intervall
-  private readonly API_URL = 'https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats';
+  private readonly API_URL = 'https://api.hyperliquid.xyz/info';
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -57,9 +55,9 @@ export class VariationalTracker implements DurableObject {
 
     // Auto-Start: Tracker automatisch starten, wenn nicht aktiv (außer bei /stop)
     if (path !== '/stop' && !this.isRunning) {
-      console.log('[VariationalTracker] Auto-starting tracker');
+      console.log('[HyperliquidTracker] Auto-starting tracker');
       await this.start().catch((error) => {
-        console.error('[VariationalTracker] Auto-start failed:', error);
+        console.error('[HyperliquidTracker] Auto-start failed:', error);
       });
     }
 
@@ -165,7 +163,7 @@ export class VariationalTracker implements DurableObject {
     }
 
     this.isRunning = true;
-    console.log('[VariationalTracker] Starting polling mechanism');
+    console.log('[HyperliquidTracker] Starting polling mechanism');
 
     // Erste Abfrage sofort durchführen
     await this.pollAndSave();
@@ -174,6 +172,7 @@ export class VariationalTracker implements DurableObject {
     this.startStatusCheck();
 
     // Polling-Interval starten
+    // Berechne Zeit bis zur nächsten :00, :15, :30 oder :45 Sekunde
     this.scheduleNextPoll();
 
     // Status in Datenbank aktualisieren
@@ -208,7 +207,7 @@ export class VariationalTracker implements DurableObject {
     // Millisekunden bis zum nächsten Poll
     const msUntilNext = (secondsUntilNext * 1000) - currentMs;
 
-    console.log(`[VariationalTracker] Next poll scheduled in ${msUntilNext}ms (at :${nextTargetSeconds.toString().padStart(2, '0')})`);
+    console.log(`[HyperliquidTracker] Next poll scheduled in ${msUntilNext}ms (at :${nextTargetSeconds.toString().padStart(2, '0')})`);
 
     this.pollingInterval = setTimeout(async () => {
       await this.pollAndSave();
@@ -235,15 +234,15 @@ export class VariationalTracker implements DurableObject {
     }
 
     this.updateTrackerStatus('stopped', null);
-    console.log('[VariationalTracker] Polling stopped');
+    console.log('[HyperliquidTracker] Polling stopped');
   }
 
   /**
    * Führt API-Abfrage durch und speichert Daten direkt
    *
    * Ablauf:
-   * 1. API aufrufen (GET /metadata/stats)
-   * 2. Listings-Array verarbeiten
+   * 1. API aufrufen (metaAndAssetCtxs)
+   * 2. universe-Array und assetCtxs-Array über Index mappen
    * 3. Buffer füllen
    * 4. Sofort in Datenbank speichern
    * 5. Buffer leeren
@@ -252,15 +251,18 @@ export class VariationalTracker implements DurableObject {
     this.lastPollTime = Date.now();
     this.pollCount++;
 
-    console.log(`[VariationalTracker] Poll #${this.pollCount} starting...`);
+    console.log(`[HyperliquidTracker] Poll #${this.pollCount} starting...`);
 
     try {
       // API aufrufen
       const response = await fetch(this.API_URL, {
-        method: 'GET',
+        method: 'POST',
         headers: {
-          'Accept': 'application/json',
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({
+          type: 'metaAndAssetCtxs',
+        }),
       });
 
       if (!response.ok) {
@@ -269,23 +271,39 @@ export class VariationalTracker implements DurableObject {
 
       const responseData = await response.json();
 
-      // Validierung
-      if (!responseData.listings || !Array.isArray(responseData.listings)) {
-        throw new Error('Invalid API response: missing listings array');
+      // API gibt Array zurück: [0] = meta mit universe, [1] = assetCtxs array
+      if (!Array.isArray(responseData) || responseData.length !== 2) {
+        throw new Error('Invalid API response: expected array with 2 elements');
       }
 
-      const listings = responseData.listings;
+      const meta = responseData[0];
+      const assetCtxs = responseData[1];
 
-      // Buffer füllen
+      // Validierung
+      if (!meta.universe || !Array.isArray(assetCtxs)) {
+        throw new Error('Invalid API response: missing universe or assetCtxs');
+      }
+
+      const universe = meta.universe;
+
+      if (universe.length !== assetCtxs.length) {
+        console.warn(`[HyperliquidTracker] Array length mismatch: universe=${universe.length}, assetCtxs=${assetCtxs.length}`);
+      }
+
+      // Buffer füllen - universe und assetCtxs über Index mappen
       this.dataBuffer.clear();
+      const maxLength = Math.min(universe.length, assetCtxs.length);
 
-      for (const listing of listings) {
-        if (listing.ticker) {
-          this.dataBuffer.set(listing.ticker, listing);
+      for (let i = 0; i < maxLength; i++) {
+        const universeItem = universe[i];
+        const assetCtx = assetCtxs[i];
+
+        if (universeItem && assetCtx && universeItem.name) {
+          this.dataBuffer.set(universeItem.name, { universe: universeItem, assetCtx });
         }
       }
 
-      console.log(`[VariationalTracker] Poll #${this.pollCount} fetched ${this.dataBuffer.size} assets`);
+      console.log(`[HyperliquidTracker] Poll #${this.pollCount} fetched ${this.dataBuffer.size} assets`);
 
       // Sofort speichern
       await this.saveToDatabase();
@@ -295,7 +313,7 @@ export class VariationalTracker implements DurableObject {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`[VariationalTracker] Poll #${this.pollCount} failed:`, errorMessage);
+      console.error(`[HyperliquidTracker] Poll #${this.pollCount} failed:`, errorMessage);
       await this.updateTrackerStatus('error', `Poll failed: ${errorMessage}`);
     }
   }
@@ -307,7 +325,7 @@ export class VariationalTracker implements DurableObject {
    */
   private async saveToDatabase(): Promise<void> {
     if (this.dataBuffer.size === 0) {
-      console.log('[VariationalTracker] No data to save');
+      console.log('[HyperliquidTracker] No data to save');
       return;
     }
 
@@ -315,66 +333,57 @@ export class VariationalTracker implements DurableObject {
 
     try {
       const recordedAt = Date.now();
-      console.log('[VariationalTracker] Starting to process buffer for database save');
+      console.log('[HyperliquidTracker] Starting to process buffer for database save');
 
       // Buffer zu Records konvertieren
-      for (const [ticker, listing] of this.dataBuffer.entries()) {
+      for (const [symbol, data] of this.dataBuffer.entries()) {
+        const { universe, assetCtx } = data;
+
         // Helper-Funktion: Default-Werte für fehlende Felder
         const getValue = (value: any, defaultValue: any) => value !== undefined && value !== null ? value : defaultValue;
 
         // Market ID aus Symbol generieren (Hash-Funktion)
-        const marketId = this.getMarketIdForSymbol(ticker);
+        const marketId = this.getMarketIdForSymbol(symbol);
 
-        // Werte parsen
-        const markPrice = parseFloat(getValue(listing.mark_price, '0'));
-        const volume24h = parseFloat(getValue(listing.volume_24h, '0'));
-        
-        // Open Interest berechnen (long + short)
-        const longOI = parseFloat(getValue(listing.open_interest?.long_open_interest, '0'));
-        const shortOI = parseFloat(getValue(listing.open_interest?.short_open_interest, '0'));
-        const totalOI = longOI + shortOI;
-        const openInterestUsd = (totalOI * markPrice).toString();
-
-        // Funding Rate normalisieren
-        // Variational: 8-Stunden-Intervall (28800 Sekunden)
-        // WICHTIG: Variational API gibt Rate bereits in Prozent (0.063914 = 0.063914%, nicht 6.3914%)
-        // Wir müssen durch 100 teilen, um auf Dezimalformat zu kommen
-        const fundingRatePercent = parseFloat(getValue(listing.funding_rate, '0'));
-        const fundingRate = fundingRatePercent / 100; // Konvertiere % zu Dezimal
-        const fundingIntervalHours = 8;
+        // Open Interest USD berechnen: OI * mark_price
+        const markPrice = parseFloat(getValue(assetCtx.markPx, '0'));
+        const openInterest = parseFloat(getValue(assetCtx.openInterest, '0'));
+        const openInterestUsd = (markPrice * openInterest).toString();
 
         records.push({
-          exchange: 'variational',
-          symbol: ticker,
+          exchange: 'hyperliquid',
+          symbol: symbol,
           market_id: marketId,
-          index_price: markPrice.toString(), // Variational hat keinen separaten Index Price
-          mark_price: markPrice.toString(),
-          open_interest: totalOI.toString(),
+          index_price: getValue(assetCtx.oraclePx, '0'),
+          mark_price: getValue(assetCtx.markPx, '0'),
+          open_interest: getValue(assetCtx.openInterest, '0'),
           open_interest_usd: openInterestUsd,
-          open_interest_limit: '0',
-          funding_clamp_small: '0',
-          funding_clamp_big: '0',
-          last_trade_price: markPrice.toString(),
-          current_funding_rate: fundingRate.toString(),
-          funding_rate: fundingRate.toString(),
+          open_interest_limit: '0', // Hyperliquid hat dieses Feld nicht
+          funding_clamp_small: '0', // Hyperliquid hat dieses Feld nicht
+          funding_clamp_big: '0', // Hyperliquid hat dieses Feld nicht
+          last_trade_price: getValue(assetCtx.midPx, '0'),
+          current_funding_rate: getValue(assetCtx.funding, '0'),
+          funding_rate: getValue(assetCtx.funding, '0'),
           funding_timestamp: recordedAt,
-          daily_base_token_volume: volume24h,
-          daily_quote_token_volume: volume24h,
-          daily_price_low: 0,
-          daily_price_high: 0,
-          daily_price_change: 0,
+          daily_base_token_volume: parseFloat(getValue(assetCtx.dayNtlVlm, '0')),
+          daily_quote_token_volume: parseFloat(getValue(assetCtx.dayNtlVlm, '0')),
+          daily_price_low: 0, // Hyperliquid hat dieses Feld nicht direkt
+          daily_price_high: 0, // Hyperliquid hat dieses Feld nicht direkt
+          daily_price_change: assetCtx.prevDayPx && assetCtx.markPx
+            ? ((parseFloat(assetCtx.markPx) - parseFloat(assetCtx.prevDayPx)) / parseFloat(assetCtx.prevDayPx))
+            : 0,
           recorded_at: recordedAt,
         });
       }
 
       if (records.length === 0) {
-        console.log('[VariationalTracker] No valid records to save');
+        console.log('[HyperliquidTracker] No valid records to save');
         return;
       }
 
       // Batch-Insert in D1 Database
       const createdAt = Math.floor(recordedAt / 1000);
-      const stmt = this.env.DB_WRITE.prepare(`
+      const stmt = this.env.DB.prepare(`
         INSERT INTO market_stats (
           exchange, symbol, market_id, index_price, mark_price,
           open_interest, open_interest_usd, open_interest_limit, funding_clamp_small,
@@ -413,18 +422,18 @@ export class VariationalTracker implements DurableObject {
 
       await this.env.DB.batch(batch);
 
-      console.log(`[VariationalTracker] Saved ${records.length} records to database`);
+      console.log(`[HyperliquidTracker] Saved ${records.length} records to database`);
 
       // Buffer leeren
       this.dataBuffer.clear();
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error('[VariationalTracker] Failed to save to database:', errorMessage);
-      console.error('[VariationalTracker] Records count:', records.length);
+      console.error('[HyperliquidTracker] Failed to save to database:', errorMessage);
+      console.error('[HyperliquidTracker] Records count:', records.length);
 
       if (records.length > 0) {
-        console.error('[VariationalTracker] Sample record:', JSON.stringify(records[0]));
+        console.error('[HyperliquidTracker] Sample record:', JSON.stringify(records[0]));
       }
 
       await this.updateTrackerStatus('error', `Database save failed: ${errorMessage}`);
@@ -441,8 +450,8 @@ export class VariationalTracker implements DurableObject {
     }
 
     this.statusCheckInterval = setInterval(() => {
-      console.log(`[VariationalTracker] Status Check - Running: ${this.isRunning}, Buffer: ${this.dataBuffer.size}, Polls: ${this.pollCount}`);
-      console.log(`[VariationalTracker] Last poll: ${new Date(this.lastPollTime).toISOString()}`);
+      console.log(`[HyperliquidTracker] Status Check - Running: ${this.isRunning}, Buffer: ${this.dataBuffer.size}, Polls: ${this.pollCount}`);
+      console.log(`[HyperliquidTracker] Last poll: ${new Date(this.lastPollTime).toISOString()}`);
     }, 30000) as any;
   }
 
@@ -466,7 +475,7 @@ export class VariationalTracker implements DurableObject {
     try {
       const now = Math.floor(Date.now() / 1000);
 
-      await this.env.DB_WRITE.prepare(`
+      await this.env.DB.prepare(`
         UPDATE tracker_status
         SET status = ?,
             last_message_at = ?,
@@ -478,12 +487,12 @@ export class VariationalTracker implements DurableObject {
         status,
         now,
         errorMessage,
-        0, // Variational hat keine Reconnects, immer 0
+        0, // Hyperliquid hat keine Reconnects, immer 0
         now,
-        'variational'
+        'hyperliquid'
       ).run();
     } catch (error) {
-      console.error('[VariationalTracker] Failed to update tracker status:', error);
+      console.error('[HyperliquidTracker] Failed to update tracker status:', error);
     }
   }
 }

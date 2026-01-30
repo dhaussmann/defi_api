@@ -386,7 +386,7 @@ export class KMTracker implements DurableObject {
 
       // Batch-Insert in D1 Database
       const createdAt = Math.floor(recordedAt / 1000);
-      const stmt = this.env.DB.prepare(`
+      const stmt = this.env.DB_WRITE.prepare(`
         INSERT INTO market_stats (
           exchange, symbol, market_id, index_price, mark_price,
           open_interest, open_interest_usd, open_interest_limit, funding_clamp_small,
@@ -478,7 +478,7 @@ export class KMTracker implements DurableObject {
     try {
       const now = Math.floor(Date.now() / 1000);
 
-      await this.env.DB.prepare(`
+      await this.env.DB_WRITE.prepare(`
         UPDATE tracker_status
         SET status = ?,
             last_message_at = ?,

@@ -383,7 +383,7 @@ export class PacificaTracker implements DurableObject {
 
     try {
       const insertStatements = records.map((record) => {
-        return this.env.DB_WRITE.prepare(
+        return this.env.DB.prepare(
           `INSERT INTO market_stats (
             exchange, symbol, market_id, last_trade_price, index_price, mark_price,
             open_interest, open_interest_usd, funding_rate, next_funding_time, created_at,
@@ -427,7 +427,7 @@ export class PacificaTracker implements DurableObject {
 
   private async updateTrackerStatus(status: string, error: string | null): Promise<void> {
     try {
-      await this.env.DB_WRITE.prepare(
+      await this.env.DB.prepare(
         `UPDATE tracker_status SET status = ?, error_message = ?, updated_at = ? WHERE exchange = ?`
       )
         .bind(status, error, Math.floor(Date.now() / 1000), 'pacifica')

@@ -350,7 +350,7 @@ async function handleApiRoute(
         const { calculateVolatilityMetrics } = await import('./volatility');
 
         // Get original_symbol from normalized_tokens
-        const tokenResult = await env.DB_READ.prepare(`
+        const tokenResult = await env.DB.prepare(`
           SELECT original_symbol FROM normalized_tokens
           WHERE exchange = ? AND symbol = ?
         `).bind(targetExchange, targetSymbol).first();
@@ -373,8 +373,8 @@ async function handleApiRoute(
         }
 
         // Update normalized_tokens
-        await env.DB_READ.prepare(`
-        UPDATE normalized_tokens
+        await env.DB.prepare(`
+          UPDATE normalized_tokens
           SET volatility_24h = ?, volatility_7d = ?, atr_14 = ?, bb_width = ?
           WHERE exchange = ? AND symbol = ?
         `).bind(
@@ -387,8 +387,8 @@ async function handleApiRoute(
         ).run();
 
         // Insert/update volatility_stats
-        await env.DB_WRITE.prepare(`
-        INSERT INTO volatility_stats (
+        await env.DB.prepare(`
+          INSERT INTO volatility_stats (
             exchange, symbol, period, volatility, atr, bb_width, std_dev,
             high, low, avg_price, calculated_at
           ) VALUES (?, ?, '24h', ?, ?, ?, ?, ?, ?, ?, ?)
@@ -649,8 +649,8 @@ async function checkTrackerHealth(env: Env): Promise<void> {
     }
 
     // Update database with health check timestamp
-    await env.DB_WRITE.prepare(`
-        UPDATE tracker_status
+    await env.DB.prepare(
+      `UPDATE tracker_status
        SET updated_at = ?
        WHERE exchange IN ('lighter', 'paradex', 'pacifica', 'edgex')`
     )
@@ -740,8 +740,8 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
         }
 
         upserts.push(
-          env.DB_READ.prepare(`
-            INSERT INTO normalized_tokens (
+          env.DB.prepare(
+            `INSERT INTO normalized_tokens (
               symbol, exchange, mark_price, index_price, open_interest_usd,
               volume_24h, funding_rate, funding_rate_hourly, funding_rate_annual, next_funding_time,
               price_change_24h, price_low_24h, price_high_24h, original_symbol, updated_at
@@ -792,7 +792,7 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
     // Step 3: Execute batch upsert
     if (upserts.length > 0) {
       console.log('[UpdateNormalizedTokens] Step 3: Executing batch upsert...');
-      const batchResult = await env.DB_READ.batch(upserts);
+      const batchResult = await env.DB.batch(upserts);
 
       console.log('[UpdateNormalizedTokens] Batch execution completed');
       console.log('[UpdateNormalizedTokens] Batch result summary:', {
@@ -927,7 +927,7 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
         GROUP BY exchange, symbol, minute_timestamp
       `;
 
-      const result = await env.DB_WRITE.prepare(aggregationQuery)
+      const result = await env.DB.prepare(aggregationQuery)
         .bind(now, batchStart, batchEnd)
         .run();
 
@@ -935,7 +935,7 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
       console.log(`[Cron] Batch ${batchCount + 1}: Aggregated ${result.meta.changes} 1-minute records`);
 
       // Delete the 15-second snapshots that were aggregated in this batch
-      const deleteResult = await env.DB_WRITE.prepare(
+      const deleteResult = await env.DB.prepare(
         'DELETE FROM market_stats WHERE created_at >= ? AND created_at < ?'
       ).bind(batchStart, batchEnd).run();
 
@@ -1032,14 +1032,14 @@ async function aggregateTo1Hour(env: Env): Promise<void> {
       GROUP BY exchange, symbol, hour_timestamp
     `;
 
-    const result = await env.DB_WRITE.prepare(aggregationQuery)
+    const result = await env.DB.prepare(aggregationQuery)
       .bind(now, oneHourAgo)
       .run();
 
     console.log(`[Cron] Aggregated ${result.meta.changes} hourly records`);
 
     // Delete the 1-minute data that was aggregated
-    const deleteResult = await env.DB_WRITE.prepare(
+    const deleteResult = await env.DB.prepare(
       'DELETE FROM market_stats_1m WHERE created_at < ?'
     ).bind(oneHourAgo).run();
 
@@ -1138,14 +1138,14 @@ async function aggregateOldMarketData(env: Env): Promise<void> {
       GROUP BY exchange, symbol, hour_timestamp
     `;
 
-    const result = await env.DB_WRITE.prepare(aggregationQuery)
+    const result = await env.DB.prepare(aggregationQuery)
       .bind(now, sevenDaysAgo)
       .run();
 
     console.log(`[Cron] Aggregated ${result.meta.changes} hourly records into market_history`);
 
     // Now delete the old data from market_stats
-    const deleteResult = await env.DB_WRITE.prepare(
+    const deleteResult = await env.DB.prepare(
       'DELETE FROM market_stats WHERE created_at < ?'
     ).bind(sevenDaysAgo).run();
 
@@ -2033,7 +2033,7 @@ async function getFundingMovingAverages(
         WHERE normalized_symbol = ? AND exchange = ?
         LIMIT 1
       `;
-      const result = await env.DB_READ.prepare(checkQuery).bind(symbolToCheck, exchange).first();
+      const result = await env.DB.prepare(checkQuery).bind(symbolToCheck, exchange).first();
       return result !== null;
     };
 
@@ -2076,7 +2076,7 @@ async function getFundingMovingAverages(
           AND avg_funding_rate IS NOT NULL
       `;
 
-      const queryResult = await env.DB_READ.prepare(query)
+      const queryResult = await env.DB.prepare(query)
         .bind(resolvedSymbol, exchange, fromTimestamp, nowSeconds)
         .first();
 
@@ -2146,7 +2146,7 @@ async function getNormalizedData(
       WHERE normalized_symbol IN (?, ?, ?, ?)
       LIMIT 4
     `;
-    const symbolCheckResult = await env.DB_READ.prepare(symbolCheckQuery)
+    const symbolCheckResult = await env.DB.prepare(symbolCheckQuery)
       .bind(...symbolVariations)
       .all();
     
@@ -2253,7 +2253,7 @@ async function getNormalizedData(
       historyQuery += ` ORDER BY hour_timestamp DESC LIMIT ?`;
       historyParams.push(limit);
 
-      const historyResult = await env.DB_READ.prepare(historyQuery).bind(...historyParams).all();
+      const historyResult = await env.DB.prepare(historyQuery).bind(...historyParams).all();
 
       if (historyResult.success && historyResult.results) {
         allData = allData.concat(
@@ -2282,7 +2282,7 @@ async function getNormalizedData(
           latestHourParams.push(exchange);
         }
 
-        const latestHourResult = await env.DB_READ.prepare(latestHourQuery).bind(...latestHourParams).first();
+        const latestHourResult = await env.DB.prepare(latestHourQuery).bind(...latestHourParams).first();
         const latestAggregatedHour = (latestHourResult?.latest_hour as number) || 0;
 
         // Only query market_stats_1m if there's a significant gap (>1 hour) to avoid unnecessary queries
@@ -2352,7 +2352,7 @@ async function getNormalizedData(
           `;
           recentHourlyParams.push(limit);
 
-          const recentHourlyResult = await env.DB_READ.prepare(recentHourlyQuery).bind(...recentHourlyParams).all();
+          const recentHourlyResult = await env.DB.prepare(recentHourlyQuery).bind(...recentHourlyParams).all();
 
           if (recentHourlyResult.success && recentHourlyResult.results && recentHourlyResult.results.length > 0) {
             console.log(`[API] Supplementing with ${recentHourlyResult.results.length} recent hourly buckets from market_stats_1m`);
@@ -2500,7 +2500,7 @@ async function getNormalizedData(
 
       aggregatedParams.push(limit);
 
-      const aggregatedResult = await env.DB_READ.prepare(aggregatedQuery).bind(...aggregatedParams).all();
+      const aggregatedResult = await env.DB.prepare(aggregatedQuery).bind(...aggregatedParams).all();
 
       if (aggregatedResult.success && aggregatedResult.results) {
         allData = allData.concat(
@@ -3058,7 +3058,7 @@ async function getLatestStats(
         ORDER BY symbol
       `;
 
-      result = await env.DB_READ.prepare(query1m).bind(...params).all<MarketStatsRecord>();
+      result = await env.DB.prepare(query1m).bind(...params).all<MarketStatsRecord>();
     }
 
     // Fallback 2: If still no data, try market_history (hourly aggregates, permanent storage)
@@ -3098,7 +3098,7 @@ async function getLatestStats(
         ORDER BY symbol
       `;
 
-      result = await env.DB_READ.prepare(queryHistory).bind(...params).all<MarketStatsRecord>();
+      result = await env.DB.prepare(queryHistory).bind(...params).all<MarketStatsRecord>();
     }
 
     return Response.json(
@@ -3128,7 +3128,7 @@ async function getTrackerStatus(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   try {
-    const result = await env.DB_WRITE.prepare(
+    const result = await env.DB.prepare(
       'SELECT * FROM tracker_status ORDER BY exchange'
     ).all();
 
