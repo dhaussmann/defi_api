@@ -711,8 +711,7 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
         index_price,
         open_interest_usd,
         funding_rate,
-        next_funding_time,
-        funding_interval_hours,
+        funding_timestamp,
         daily_base_token_volume,
         daily_price_change,
         daily_price_low,
@@ -749,8 +748,10 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
       try {
         const normalizedSymbol = normalizeSymbol(row.symbol);
         const fundingRate = parseFloat(row.funding_rate || '0');
-        const intervalHours = row.funding_interval_hours ? parseInt(row.funding_interval_hours) : undefined;
-        const fundingRates = calculateFundingRates(fundingRate, row.exchange, intervalHours);
+        const fundingRates = calculateFundingRates(fundingRate, row.exchange);
+
+        // Calculate next_funding_time from funding_timestamp
+        const nextFundingTime = row.funding_timestamp ? parseInt(row.funding_timestamp) : null;
 
         // Log first few entries for debugging
         if (processedCount < 3) {
@@ -759,10 +760,10 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
             symbol: row.symbol,
             normalizedSymbol,
             fundingRate,
-            intervalHours,
             fundingRateHourly: fundingRates.hourly,
             fundingRateAnnual: fundingRates.annual,
             markPrice: row.mark_price,
+            nextFundingTime,
           });
         }
 
@@ -797,7 +798,7 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
             fundingRate,
             fundingRates.hourly,
             fundingRates.annual,
-            row.next_funding_time ? parseInt(row.next_funding_time) : null,
+            nextFundingTime,
             parseFloat(row.daily_price_change || '0'),
             parseFloat(row.daily_price_low || '0'),
             parseFloat(row.daily_price_high || '0'),
