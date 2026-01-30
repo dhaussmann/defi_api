@@ -100,6 +100,23 @@ export default {
         console.log('[Debug] Manually triggering hourly aggregation');
         await aggregateTo1Hour(env);
         return Response.json({ success: true, message: 'Hourly aggregation triggered' }, { headers: corsHeaders });
+      } else if (path === '/debug/check-db-write') {
+        const now = Math.floor(Date.now() / 1000);
+        const result = await env.DB_WRITE.prepare('SELECT COUNT(*) as count, MAX(created_at) as latest FROM market_stats').first();
+        const recent = await env.DB_WRITE.prepare('SELECT COUNT(*) as count FROM market_stats WHERE created_at > ?').bind(now - 600).first();
+        return Response.json({ 
+          success: true, 
+          db_write: { total: result, recent_10min: recent },
+          current_time: now
+        }, { headers: corsHeaders });
+      } else if (path === '/debug/check-db-read') {
+        const readResult = await env.DB_READ.prepare('SELECT COUNT(*) as count, MAX(updated_at) as latest FROM normalized_tokens').first();
+        const sample = await env.DB_READ.prepare('SELECT * FROM normalized_tokens LIMIT 3').all();
+        return Response.json({ 
+          success: true, 
+          db_read: { total: readResult, sample: sample.results },
+          current_time: Math.floor(Date.now() / 1000)
+        }, { headers: corsHeaders });
       } else if (path === '/' || path === '') {
         return handleRoot(corsHeaders);
       } else {
