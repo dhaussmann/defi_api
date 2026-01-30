@@ -335,7 +335,11 @@ export interface Env {
   VNTL_TRACKER: DurableObjectNamespace;
   KM_TRACKER: DurableObjectNamespace;
   VARIATIONAL_TRACKER: DurableObjectNamespace;
-  DB: D1Database;
+  
+  // 2-DB Architecture
+  DB_WRITE: D1Database;   // Hot data: market_stats, aggregates, tracker_status
+  DB_READ: D1Database;    // API queries: normalized_tokens
+  DB: D1Database;         // Backup: Keep old DB during migration
   SNAPSHOT_INTERVAL_MS?: string;
 }
 

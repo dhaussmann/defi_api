@@ -337,8 +337,10 @@ export class VariationalTracker implements DurableObject {
 
         // Funding Rate normalisieren
         // Variational: 8-Stunden-Intervall (28800 Sekunden)
-        // Funding Rate ist bereits als Dezimalzahl (0.037347 = 3.7347%)
-        const fundingRate = parseFloat(getValue(listing.funding_rate, '0'));
+        // WICHTIG: Variational API gibt Rate bereits in Prozent (0.063914 = 0.063914%, nicht 6.3914%)
+        // Wir müssen durch 100 teilen, um auf Dezimalformat zu kommen
+        const fundingRatePercent = parseFloat(getValue(listing.funding_rate, '0'));
+        const fundingRate = fundingRatePercent / 100; // Konvertiere % zu Dezimal
         const fundingIntervalHours = 8;
 
         records.push({
