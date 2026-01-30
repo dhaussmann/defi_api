@@ -117,6 +117,16 @@ export default {
           db_read: { total: readResult, sample: sample.results },
           current_time: Math.floor(Date.now() / 1000)
         }, { headers: corsHeaders });
+      } else if (path === '/debug/test-query') {
+        const now = Math.floor(Date.now() / 1000);
+        const tenMinutesAgo = now - 600;
+        const testQuery = `SELECT exchange, symbol, mark_price, created_at FROM market_stats WHERE created_at > ? LIMIT 5`;
+        const result = await env.DB_WRITE.prepare(testQuery).bind(tenMinutesAgo).all();
+        return Response.json({ 
+          success: true, 
+          query_result: { count: result.results?.length || 0, sample: result.results },
+          time_window: { now, tenMinutesAgo }
+        }, { headers: corsHeaders });
       } else if (path === '/' || path === '') {
         return handleRoot(corsHeaders);
       } else {
@@ -809,16 +819,27 @@ async function updateNormalizedTokens(env: Env): Promise<void> {
     // Step 3: Execute batch upsert
     if (upserts.length > 0) {
       console.log('[UpdateNormalizedTokens] Step 3: Executing batch upsert...');
-      const batchResult = await env.DB_READ.batch(upserts);
+      try {
+        const batchResult = await env.DB_READ.batch(upserts);
 
-      console.log('[UpdateNormalizedTokens] Batch execution completed');
-      console.log('[UpdateNormalizedTokens] Batch result summary:', {
-        totalStatements: upserts.length,
-        results: batchResult.length,
-        firstResult: batchResult[0]
-      });
+        console.log('[UpdateNormalizedTokens] Batch execution completed');
+        console.log('[UpdateNormalizedTokens] Batch result summary:', {
+          totalStatements: upserts.length,
+          results: batchResult.length,
+          firstResult: batchResult[0],
+          allResults: batchResult.map((r: any) => ({ success: r.success, error: r.error }))
+        });
 
-      console.log(`[UpdateNormalizedTokens] ✅ Successfully updated ${upserts.length} entries`);
+        console.log(`[UpdateNormalizedTokens] ✅ Successfully updated ${upserts.length} entries`);
+      } catch (batchError) {
+        console.error('[UpdateNormalizedTokens] ❌ Batch insert FAILED:', batchError);
+        console.error('[UpdateNormalizedTokens] Error details:', {
+          message: batchError instanceof Error ? batchError.message : String(batchError),
+          stack: batchError instanceof Error ? batchError.stack : undefined,
+          upsertCount: upserts.length
+        });
+        throw batchError;
+      }
     } else {
       console.log('[UpdateNormalizedTokens] ⚠️ No records to update');
     }
