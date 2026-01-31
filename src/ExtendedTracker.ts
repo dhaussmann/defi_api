@@ -167,16 +167,23 @@ export class ExtendedTracker implements DurableObject {
       console.log('[ExtendedTracker] Triggering initial poll');
       await this.pollMarkets();
       console.log('[ExtendedTracker] Initial poll completed');
+      
+      // Sofort ersten Snapshot nach Poll
+      console.log('[ExtendedTracker] Triggering initial snapshot');
+      await this.saveSnapshot();
+      console.log('[ExtendedTracker] Initial snapshot completed');
 
       // Regelmäßiges Polling starten (alle 15 Sekunden)
       console.log(`[ExtendedTracker] Setting up poll interval: ${this.POLL_INTERVAL}ms`);
       this.pollInterval = setInterval(async () => {
+        console.log('[ExtendedTracker] Poll interval triggered');
         await this.pollMarkets();
       }, this.POLL_INTERVAL) as any;
 
-      // Snapshot-Timer starten (alle 60 Sekunden)
+      // Snapshot-Timer starten (alle 15 Sekunden)
       console.log(`[ExtendedTracker] Setting up snapshot interval: ${this.SNAPSHOT_INTERVAL}ms`);
       this.snapshotInterval = setInterval(async () => {
+        console.log('[ExtendedTracker] Snapshot interval triggered');
         await this.saveSnapshot();
       }, this.SNAPSHOT_INTERVAL) as any;
 
@@ -325,28 +332,27 @@ export class ExtendedTracker implements DurableObject {
         return this.env.DB_WRITE.prepare(
           `INSERT INTO market_stats (
             exchange, symbol, market_id, last_trade_price, index_price, mark_price,
-            open_interest, open_interest_usd, funding_rate, next_funding_time, created_at,
+            open_interest, open_interest_usd, funding_rate, funding_timestamp, created_at,
             open_interest_limit, funding_clamp_small, funding_clamp_big,
-            current_funding_rate, funding_timestamp, daily_base_token_volume,
+            current_funding_rate, daily_base_token_volume,
             daily_quote_token_volume, daily_price_low, daily_price_high, daily_price_change, recorded_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           record.exchange,
           record.symbol,
-          0, // market_id as INTEGER
+          '0', // market_id as TEXT
           record.last_trade_price || '0',
           record.index_price || '0',
           record.mark_price || '0',
           record.open_interest || '0',
           record.open_interest_usd || '0',
           record.funding_rate || '0',
-          record.next_funding_time || '0',
+          parseInt(record.next_funding_time || '0'), // funding_timestamp (next funding time)
           record.created_at,
           '0', // open_interest_limit
           '0', // funding_clamp_small
           '0', // funding_clamp_big
           record.funding_rate || '0', // current_funding_rate
-          0, // funding_timestamp
           parseFloat(record.volume_24h || '0'), // daily_base_token_volume (24h volume in USD)
           0, // daily_quote_token_volume
           parseFloat(record.daily_low || '0'), // daily_price_low
