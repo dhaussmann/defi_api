@@ -14,6 +14,8 @@ import { VariationalTracker } from './VariationalTracker';
 import { Env, ApiResponse, MarketStatsQuery, MarketStatsRecord } from './types';
 import { calculateAllVolatilityMetrics } from './volatility';
 import { calculateAndCacheFundingMAs, getCachedFundingMAs } from './maCache';
+import { calculateAndCacheArbitrage } from './arbitrageCache';
+import { getArbitrageOpportunities } from './arbitrageHandler';
 
 export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker, VariationalTracker };
 
@@ -22,7 +24,7 @@ export default {
     const cronType = event.cron || '*/5 * * * *'; // Default to 5-minute cron
     console.log(`[Cron] Scheduled event triggered: ${cronType} at ${new Date().toISOString()}`);
 
-    // Every 5 minutes: Health check + normalized_tokens update + 1-minute aggregation + MA cache
+    // Every 5 minutes: Health check + normalized_tokens update + 1-minute aggregation + MA cache + sync aggregations
     if (cronType === '*/5 * * * *') {
       try {
         console.log('[Cron] Running WebSocket health check');
@@ -34,8 +36,17 @@ export default {
         console.log('[Cron] Running 15s → 1m aggregation');
         await aggregateTo1Minute(env);
 
+        console.log('[Cron] Syncing aggregations to DB_READ');
+        await syncAggregationsToRead(env);
+
+        console.log('[Cron] Syncing market_history to DB_READ');
+        await syncMarketHistoryToRead(env);
+
         console.log('[Cron] Calculating and caching moving averages');
         await calculateAndCacheFundingMAs(env);
+
+        console.log('[Cron] Calculating and caching arbitrage opportunities');
+        await calculateAndCacheArbitrage(env);
 
         console.log('[Cron] 5-minute tasks completed successfully');
       } catch (error) {
@@ -288,6 +299,8 @@ async function handleApiRoute(
       return await getFundingMovingAverages(env, url, corsHeaders);
     case '/api/funding/ma/bulk':
       return await getBulkFundingMovingAverages(env, url, corsHeaders);
+    case '/api/funding/arbitrage':
+      return await getArbitrageOpportunities(env, url, corsHeaders);
     case '/api/admin/cache-ma':
       // Temporary endpoint to manually trigger MA cache calculation
       // Query param: all=true to calculate all timeframes at once
@@ -302,6 +315,14 @@ async function handleApiRoute(
           await calculateAndCacheFundingMAs(env);
           return Response.json({ success: true, message: 'MA cache calculation triggered' }, { headers: corsHeaders });
         }
+      } catch (error) {
+        return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
+      }
+    case '/api/admin/cache-arbitrage':
+      // Manual trigger for arbitrage calculation
+      try {
+        await calculateAndCacheArbitrage(env);
+        return Response.json({ success: true, message: 'Arbitrage cache calculation triggered' }, { headers: corsHeaders });
       } catch (error) {
         return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
       }
@@ -336,6 +357,45 @@ async function handleApiRoute(
       } catch (error) {
         return Response.json(
           { success: false, error: error instanceof Error ? error.message : 'Aggregation failed' },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    case '/api/admin/import-market-history':
+      // One-time import of historical market_history from DB_READ to DB_WRITE
+      try {
+        const importResult = await importHistoricalMarketHistory(env);
+        return Response.json(
+          { 
+            success: true, 
+            message: 'Historical data import completed',
+            recordsImported: importResult.recordsImported,
+            durationMs: importResult.durationMs
+          },
+          { headers: corsHeaders }
+        );
+      } catch (error) {
+        return Response.json(
+          { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+
+    case '/api/admin/fix-variational-intervals':
+      // Fix old Variational data with missing funding_interval_hours
+      try {
+        const fixResult = await fixVariationalFundingIntervals(env);
+        return Response.json(
+          { 
+            success: true, 
+            message: 'Variational funding intervals fixed',
+            recordsUpdated: fixResult.recordsUpdated,
+            durationMs: fixResult.durationMs
+          },
+          { headers: corsHeaders }
+        );
+      } catch (error) {
+        return Response.json(
+          { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
           { status: 500, headers: corsHeaders }
         );
       }
@@ -898,51 +958,39 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
 
       console.log(`[Cron] Processing batch ${batchCount + 1}: ${new Date(batchStart * 1000).toISOString()} to ${new Date(batchEnd * 1000).toISOString()}`);
 
-      // Aggregate this specific batch
+      // Aggregate this specific batch - match DB_WRITE schema
       const aggregationQuery = `
         INSERT OR REPLACE INTO market_stats_1m (
-          exchange, symbol, normalized_symbol,
-          avg_mark_price, avg_index_price, min_price, max_price, price_volatility,
-          volume_base, volume_quote,
-          avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
-          avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
-          minute_timestamp, sample_count, created_at
+          exchange, symbol, minute_timestamp,
+          avg_mark_price, avg_index_price, 
+          avg_open_interest_usd,
+          avg_funding_rate, avg_funding_rate_annual,
+          sum_volume,
+          price_low, price_high, price_change,
+          sample_count, created_at
         )
         SELECT
           exchange,
           symbol,
-          REPLACE(REPLACE(REPLACE(REPLACE(
-            UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-              symbol,
-              'xyz:', ''), 'hyna:', ''), 'flx:', ''), 'vntl:', ''), 'km:', ''),
-              'edgex:', ''), 'aster:', '')),
-            '-USD-PERP', ''), '-USD', ''), 'USDT', ''), 'USD', '')
-          as normalized_symbol,
-          -- Prices
+          (created_at / 60) * 60 as minute_timestamp,
           AVG(CAST(mark_price AS REAL)) as avg_mark_price,
           AVG(CAST(index_price AS REAL)) as avg_index_price,
-          MIN(CAST(mark_price AS REAL)) as min_price,
-          MAX(CAST(mark_price AS REAL)) as max_price,
-          -- Volatility: (max - min) / avg * 100
-          CASE
-            WHEN AVG(CAST(mark_price AS REAL)) > 0
-            THEN ((MAX(CAST(mark_price AS REAL)) - MIN(CAST(mark_price AS REAL))) / AVG(CAST(mark_price AS REAL)) * 100)
-            ELSE 0
-          END as price_volatility,
-          -- Volume (sum)
-          SUM(daily_base_token_volume) as volume_base,
-          SUM(daily_quote_token_volume) as volume_quote,
-          -- Open Interest
-          AVG(CAST(open_interest AS REAL)) as avg_open_interest,
           AVG(CAST(open_interest_usd AS REAL)) as avg_open_interest_usd,
-          MAX(CAST(open_interest_usd AS REAL)) as max_open_interest_usd,
-          -- Funding Rate
           AVG(CAST(funding_rate AS REAL)) as avg_funding_rate,
+          -- Calculate annualized funding rate based on funding_interval_hours
           CASE
-            WHEN exchange = 'hyperliquid' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+            WHEN exchange = 'hyperliquid' THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
             WHEN exchange = 'paradex' THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
             WHEN exchange = 'edgex' THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
             WHEN exchange = 'lighter' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365
+            WHEN exchange = 'variational' THEN 
+              CASE
+                WHEN AVG(funding_interval_hours) = 1 THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+                WHEN AVG(funding_interval_hours) = 2 THEN AVG(CAST(funding_rate AS REAL)) * 12 * 365 * 100
+                WHEN AVG(funding_interval_hours) = 4 THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
+                WHEN AVG(funding_interval_hours) = 8 THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+                ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+              END
             WHEN exchange = 'aster' THEN
               CASE
                 WHEN AVG(funding_interval_hours) = 1 THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
@@ -950,15 +998,12 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
                 WHEN AVG(funding_interval_hours) = 8 THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
                 ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
               END
-            WHEN exchange = 'extended' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
-            WHEN exchange = 'pacifica' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
-            WHEN exchange IN ('hyena', 'xyz', 'flx', 'vntl', 'km') THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
             ELSE AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
           END as avg_funding_rate_annual,
-          MIN(CAST(funding_rate AS REAL)) as min_funding_rate,
-          MAX(CAST(funding_rate AS REAL)) as max_funding_rate,
-          -- Timestamp rounded to minute
-          (created_at / 60) * 60 as minute_timestamp,
+          SUM(daily_base_token_volume) as sum_volume,
+          MIN(CAST(mark_price AS REAL)) as price_low,
+          MAX(CAST(mark_price AS REAL)) as price_high,
+          AVG(daily_price_change) as price_change,
           COUNT(*) as sample_count,
           ? as created_at
         FROM market_stats
@@ -993,6 +1038,115 @@ async function aggregateTo1Minute(env: Env): Promise<void> {
 
   } catch (error) {
     console.error('[Cron] Failed to aggregate to 1-minute:', error);
+  }
+}
+
+// Sync recent aggregations from DB_WRITE to DB_READ
+async function syncAggregationsToRead(env: Env): Promise<void> {
+  try {
+    console.log('[Cron] Starting aggregation sync: DB_WRITE → DB_READ');
+    
+    const now = Math.floor(Date.now() / 1000);
+    const oneHourAgo = now - 3600;
+    
+    // Get recent 1-minute aggregates from DB_WRITE
+    const sourceData = await env.DB_WRITE.prepare(
+      `SELECT * FROM market_stats_1m WHERE minute_timestamp >= ? ORDER BY minute_timestamp DESC LIMIT 5000`
+    ).bind(oneHourAgo).all();
+    
+    if (!sourceData.results || sourceData.results.length === 0) {
+      console.log('[Cron] No recent aggregations to sync');
+      return;
+    }
+    
+    console.log(`[Cron] Found ${sourceData.results.length} recent 1m aggregates to sync`);
+    
+    // Batch insert to DB_READ
+    const insertStatements = sourceData.results.map((row: any) => {
+      return env.DB_READ.prepare(
+        `INSERT OR REPLACE INTO market_stats_1m (
+          exchange, symbol, minute_timestamp,
+          avg_mark_price, avg_index_price, avg_open_interest_usd,
+          avg_funding_rate, sum_volume, price_low, price_high, price_change,
+          sample_count, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        row.exchange,
+        row.symbol,
+        row.minute_timestamp,
+        row.avg_mark_price,
+        row.avg_index_price,
+        row.avg_open_interest_usd,
+        row.avg_funding_rate,
+        row.sum_volume,
+        row.price_low,
+        row.price_high,
+        row.price_change,
+        row.sample_count,
+        row.created_at
+      );
+    });
+    
+    await env.DB_READ.batch(insertStatements);
+    console.log(`[Cron] Synced ${sourceData.results.length} aggregates to DB_READ`);
+    
+  } catch (error) {
+    console.error('[Cron] Error syncing aggregations:', error);
+  }
+}
+
+// Sync market_history from DB_WRITE to DB_READ
+async function syncMarketHistoryToRead(env: Env): Promise<void> {
+  try {
+    console.log('[Sync] Starting market_history sync from DB_WRITE to DB_READ');
+
+    // Get the latest synced timestamp from DB_READ
+    const lastSyncQuery = await env.DB_READ.prepare(
+      'SELECT MAX(aggregated_at) as last_sync FROM market_history'
+    ).first<{ last_sync: number }>();
+
+    const lastSync = lastSyncQuery?.last_sync || 0;
+    console.log(`[Sync] Last market_history sync: ${lastSync} (${new Date(lastSync * 1000).toISOString()})`);
+
+    // Get new hourly aggregates from DB_WRITE
+    const newDataQuery = await env.DB_WRITE.prepare(
+      'SELECT * FROM market_history WHERE aggregated_at > ? ORDER BY aggregated_at ASC LIMIT 5000'
+    ).bind(lastSync).all();
+
+    if (!newDataQuery.success || !newDataQuery.results || newDataQuery.results.length === 0) {
+      console.log('[Sync] No new market_history to sync');
+      return;
+    }
+
+    console.log(`[Sync] Found ${newDataQuery.results.length} new hourly aggregates to sync`);
+
+    // Batch insert into DB_READ
+    const insertStatements = newDataQuery.results.map((row: any) =>
+      env.DB_READ.prepare(`
+        INSERT OR REPLACE INTO market_history (
+          exchange, symbol, normalized_symbol,
+          avg_mark_price, avg_index_price, min_price, max_price, price_volatility,
+          volume_base, volume_quote,
+          avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
+          avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
+          hour_timestamp, sample_count, aggregated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        row.exchange, row.symbol, row.normalized_symbol,
+        row.avg_mark_price, row.avg_index_price, row.min_price, row.max_price, row.price_volatility,
+        row.volume_base, row.volume_quote,
+        row.avg_open_interest, row.avg_open_interest_usd, row.max_open_interest_usd,
+        row.avg_funding_rate, row.avg_funding_rate_annual, row.min_funding_rate, row.max_funding_rate,
+        row.hour_timestamp, row.sample_count, row.aggregated_at
+      )
+    );
+
+    await env.DB_READ.batch(insertStatements);
+
+    console.log(`[Sync] Successfully synced ${newDataQuery.results.length} hourly aggregates to DB_READ`);
+
+  } catch (error) {
+    console.error('[Sync] Failed to sync market_history:', error);
   }
 }
 
@@ -1090,6 +1244,139 @@ async function aggregateTo1Hour(env: Env): Promise<void> {
   }
 }
 
+// Fix old Variational data with missing funding_interval_hours
+// Fetches current intervals from API and updates old records
+async function fixVariationalFundingIntervals(env: Env): Promise<{ recordsUpdated: number; durationMs: number }> {
+  const startTime = Date.now();
+  console.log('[Fix] Starting Variational funding interval correction');
+
+  try {
+    // Fetch current market data from Variational API to get correct intervals
+    const response = await fetch('https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats');
+    const data = await response.json() as any;
+    
+    if (!data.listings || !Array.isArray(data.listings)) {
+      throw new Error('Invalid API response from Variational');
+    }
+
+    console.log(`[Fix] Fetched ${data.listings.length} markets from Variational API`);
+
+    // Create a map of symbol -> funding_interval_hours
+    const intervalMap = new Map<string, number>();
+    for (const listing of data.listings) {
+      const symbol = listing.ticker;
+      const intervalSeconds = parseInt(listing.funding_interval_s || '28800');
+      const intervalHours = intervalSeconds / 3600;
+      intervalMap.set(symbol, intervalHours);
+    }
+
+    console.log(`[Fix] Created interval map for ${intervalMap.size} symbols`);
+
+    // Update all Variational records that have NULL funding_interval_hours
+    let totalUpdated = 0;
+    const BATCH_SIZE = 100;
+
+    // Process in batches by symbol
+    const symbols = Array.from(intervalMap.keys());
+    for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+      const batch = symbols.slice(i, i + BATCH_SIZE);
+      
+      const updateStatements = batch.map(symbol => {
+        const intervalHours = intervalMap.get(symbol)!;
+        return env.DB_WRITE.prepare(`
+          UPDATE market_stats 
+          SET funding_interval_hours = ?
+          WHERE exchange = 'variational' 
+            AND symbol = ?
+            AND funding_interval_hours IS NULL
+        `).bind(intervalHours, symbol);
+      });
+
+      const results = await env.DB_WRITE.batch(updateStatements);
+      const batchUpdated = results.reduce((sum, r: any) => sum + (r.meta?.changes || 0), 0);
+      totalUpdated += batchUpdated;
+      
+      console.log(`[Fix] Batch ${Math.floor(i / BATCH_SIZE) + 1}: Updated ${batchUpdated} records`);
+    }
+
+    const durationMs = Date.now() - startTime;
+    console.log(`[Fix] ✅ Successfully updated ${totalUpdated} records in ${durationMs}ms`);
+
+    return { recordsUpdated: totalUpdated, durationMs };
+
+  } catch (error) {
+    console.error('[Fix] Failed to fix Variational intervals:', error);
+    throw error;
+  }
+}
+
+// Import historical market_history data from DB_READ to DB_WRITE
+// One-time operation to enable 30-day MA calculations immediately
+async function importHistoricalMarketHistory(env: Env): Promise<{ recordsImported: number; durationMs: number }> {
+  const startTime = Date.now();
+  console.log('[Import] Starting historical market_history import from DB_READ to DB_WRITE');
+
+  try {
+    // Get all historical data from DB_READ (last 30 days)
+    const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+    
+    const dataQuery = await env.DB_READ.prepare(`
+      SELECT * FROM market_history 
+      WHERE hour_timestamp >= ?
+      ORDER BY hour_timestamp ASC
+    `).bind(thirtyDaysAgo).all();
+
+    if (!dataQuery.success || !dataQuery.results || dataQuery.results.length === 0) {
+      console.log('[Import] No historical data found in DB_READ');
+      return { recordsImported: 0, durationMs: Date.now() - startTime };
+    }
+
+    console.log(`[Import] Found ${dataQuery.results.length} historical records to import`);
+
+    // Import in batches of 1000 to avoid timeout
+    const BATCH_SIZE = 1000;
+    let totalImported = 0;
+
+    for (let i = 0; i < dataQuery.results.length; i += BATCH_SIZE) {
+      const batch = dataQuery.results.slice(i, i + BATCH_SIZE);
+      
+      const insertStatements = batch.map((row: any) =>
+        env.DB_WRITE.prepare(`
+          INSERT OR REPLACE INTO market_history (
+            exchange, symbol, normalized_symbol,
+            avg_mark_price, avg_index_price, min_price, max_price, price_volatility,
+            volume_base, volume_quote,
+            avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
+            avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
+            hour_timestamp, sample_count, aggregated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          row.exchange, row.symbol, row.normalized_symbol,
+          row.avg_mark_price, row.avg_index_price, row.min_price, row.max_price, row.price_volatility,
+          row.volume_base, row.volume_quote,
+          row.avg_open_interest, row.avg_open_interest_usd, row.max_open_interest_usd,
+          row.avg_funding_rate, row.avg_funding_rate_annual, row.min_funding_rate, row.max_funding_rate,
+          row.hour_timestamp, row.sample_count, row.aggregated_at
+        )
+      );
+
+      await env.DB_WRITE.batch(insertStatements);
+      totalImported += batch.length;
+      
+      console.log(`[Import] Batch ${Math.floor(i / BATCH_SIZE) + 1}: Imported ${batch.length} records (total: ${totalImported})`);
+    }
+
+    const durationMs = Date.now() - startTime;
+    console.log(`[Import] ✅ Successfully imported ${totalImported} historical records in ${durationMs}ms`);
+
+    return { recordsImported: totalImported, durationMs };
+
+  } catch (error) {
+    console.error('[Import] Failed to import historical data:', error);
+    throw error;
+  }
+}
+
 // DEPRECATED: Old aggregation function (7-day retention)
 // Kept for backwards compatibility, will be removed in next version
 async function aggregateOldMarketData(env: Env): Promise<void> {
@@ -1151,7 +1438,7 @@ async function aggregateOldMarketData(env: Env): Promise<void> {
         -- Funding Rate
         AVG(CAST(funding_rate AS REAL)) as avg_funding_rate,
         CASE
-          WHEN exchange = 'hyperliquid' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+          WHEN exchange = 'hyperliquid' THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
           WHEN exchange = 'paradex' THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
           WHEN exchange = 'edgex' THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
           WHEN exchange = 'lighter' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365
@@ -1361,6 +1648,7 @@ async function getAllMarkets(
     }
 
     // Map results (including volatility metrics)
+    // Funding rates are stored as decimal but represent percentage values
     const markets = result.results.map((row: any) => ({
       symbol: row.symbol,
       exchange: row.exchange,
@@ -1496,7 +1784,7 @@ async function getFundingRateHistory(
         hour_timestamp * 1000 as collected_at,
         datetime(hour_timestamp, 'unixepoch') as timestamp
       FROM market_history
-      WHERE normalized_symbol = ?
+      WHERE symbol = ?
     `;
 
     const params2: any[] = [symbol];
@@ -2060,16 +2348,21 @@ async function getFundingMovingAverages(
 
     // Smart symbol resolution: try multiple variations to find the token
     const symbolVariations = [
-      symbol,
-      `1000${symbol}`,
-      `k${symbol}`,
-      `K${symbol}`,
+      symbol,                    // BTC
+      `${symbol}USD`,           // BTCUSD (edgex)
+      `${symbol}-USD`,          // BTC-USD (extended)
+      `${symbol}-USD-PERP`,     // BTC-USD-PERP (paradex)
+      `hyna:${symbol}`,         // hyna:BTC (hyena)
+      `flx:${symbol}`,          // flx:BTC (flx)
+      `1000${symbol}`,          // 1000PEPE
+      `k${symbol}`,             // kPEPE
+      `K${symbol}`,             // KPEPE
     ];
 
     const findExistingSymbol = async (symbolToCheck: string): Promise<boolean> => {
       const checkQuery = `
         SELECT 1 FROM market_stats_1m 
-        WHERE normalized_symbol = ? AND exchange = ?
+        WHERE symbol = ? AND exchange = ?
         LIMIT 1
       `;
       const result = await env.DB_READ.prepare(checkQuery).bind(symbolToCheck, exchange).first();
@@ -2100,18 +2393,18 @@ async function getFundingMovingAverages(
       exchange,
     };
 
-    // Calculate moving average for each period
+    // Calculate moving average for each period using market_history
     for (const [periodName, periodSeconds] of Object.entries(periods)) {
       const fromTimestamp = nowSeconds - periodSeconds;
 
-      // Query market_stats_1m for the period
+      // Simple query: calculate MA directly from market_history hourly aggregates
       const query = `
         SELECT AVG(avg_funding_rate) as avg_funding_rate
-        FROM market_stats_1m
-        WHERE normalized_symbol = ?
+        FROM market_history
+        WHERE symbol = ?
           AND exchange = ?
-          AND minute_timestamp >= ?
-          AND minute_timestamp <= ?
+          AND hour_timestamp >= ?
+          AND hour_timestamp <= ?
           AND avg_funding_rate IS NOT NULL
       `;
 
@@ -2119,8 +2412,10 @@ async function getFundingMovingAverages(
         .bind(resolvedSymbol, exchange, fromTimestamp, nowSeconds)
         .first();
 
-      if (queryResult && queryResult.avg_funding_rate !== null) {
-        result[`ma${periodName}`] = parseFloat((queryResult.avg_funding_rate as number).toFixed(6));
+      const avgFundingRate = queryResult?.avg_funding_rate as number | null;
+
+      if (avgFundingRate !== null) {
+        result[`ma${periodName}`] = parseFloat(avgFundingRate.toFixed(6));
       } else {
         result[`ma${periodName}`] = null;
       }
@@ -2169,28 +2464,53 @@ async function getNormalizedData(
       );
     }
 
-    // Smart symbol resolution: find ALL matching variations to support tokens like PEPE
-    // that exist as both "1000PEPE" and "kPEPE" across different exchanges
-    const symbolVariations = [
-      symbol,                    // Original (e.g., "BTC" or "PEPE")
-      `1000${symbol}`,          // With 1000 prefix (e.g., "1000PEPE")
-      `k${symbol}`,             // With k prefix lowercase (e.g., "kPEPE")
-      `K${symbol}`,             // With K prefix uppercase (e.g., "KPEPE")
-    ];
-
-    // Find ALL symbol variations that exist in a single query (optimized to prevent DB overload)
-    const symbolCheckQuery = `
-      SELECT DISTINCT normalized_symbol 
+    // Smart symbol resolution: find ALL matching variations across exchanges
+    // Different exchanges use different formats:
+    // - BTC (hyperliquid, lighter, variational)
+    // - BTCUSD (edgex)
+    // - BTC-USD (extended)
+    // - BTC-USD-PERP (paradex)
+    // - hyna:BTC, flx:BTC, etc. (prefixed exchanges)
+    // - 1000PEPE, kPEPE (for certain tokens)
+    
+    // Build query to find all symbols containing the base symbol
+    let symbolCheckQuery = `
+      SELECT DISTINCT symbol, exchange
       FROM market_stats_1m 
-      WHERE normalized_symbol IN (?, ?, ?, ?)
-      LIMIT 4
+      WHERE (
+        symbol = ? 
+        OR symbol LIKE ?
+        OR symbol LIKE ?
+        OR symbol LIKE ?
+        OR symbol LIKE ?
+        OR symbol LIKE ?
+      )
     `;
+    
+    const symbolPatterns = [
+      symbol,                    // Exact match: BTC
+      `%:${symbol}`,            // Prefix format: hyna:BTC, flx:BTC
+      `${symbol}%`,             // Suffix format: BTCUSD, BTCUSDT
+      `${symbol}-%`,            // Dash format: BTC-USD, BTC-USD-PERP
+      `1000${symbol}%`,         // 1000 prefix: 1000PEPE
+      `k${symbol}%`,            // k prefix: kPEPE
+    ];
+    
+    // Add exchange filter if specified
+    if (exchange) {
+      symbolCheckQuery += ` AND exchange = ?`;
+    }
+    
+    const bindParams = exchange 
+      ? [...symbolPatterns, exchange]
+      : symbolPatterns;
+    
     const symbolCheckResult = await env.DB_READ.prepare(symbolCheckQuery)
-      .bind(...symbolVariations)
+      .bind(...bindParams)
       .all();
     
     const resolvedSymbols: string[] = symbolCheckResult.success && symbolCheckResult.results
-      ? symbolCheckResult.results.map((row: any) => row.normalized_symbol)
+      ? symbolCheckResult.results.map((row: any) => row.symbol)
       : [];
 
     // If no variations found, return error
@@ -2256,26 +2576,26 @@ async function getNormalizedData(
         SELECT
           exchange,
           symbol as original_symbol,
-          normalized_symbol,
+          symbol as normalized_symbol,
           avg_mark_price as mark_price,
           avg_index_price as index_price,
-          min_price,
-          max_price,
-          price_volatility as volatility,
-          volume_base,
-          volume_quote,
-          avg_open_interest as open_interest,
+          0 as min_price,
+          0 as max_price,
+          0 as price_volatility,
+          0 as volume_base,
+          0 as volume_quote,
+          0 as avg_open_interest,
           avg_open_interest_usd as open_interest_usd,
-          max_open_interest_usd,
+          0 as max_open_interest_usd,
           avg_funding_rate as funding_rate,
-          avg_funding_rate_annual as funding_rate_annual,
-          min_funding_rate,
-          max_funding_rate,
+          0 as avg_funding_rate_annual,
+          0 as min_funding_rate,
+          0 as max_funding_rate,
           hour_timestamp as timestamp,
           sample_count,
           datetime(hour_timestamp, 'unixepoch') as timestamp_iso
         FROM market_history
-        WHERE normalized_symbol IN (${symbolPlaceholders})
+        WHERE symbol IN (${symbolPlaceholders})
       `;
 
       const historyParams: any[] = [...resolvedSymbols];
@@ -2311,7 +2631,7 @@ async function getNormalizedData(
         let latestHourQuery = `
           SELECT MAX(hour_timestamp) as latest_hour
           FROM market_history
-          WHERE normalized_symbol IN (${symbolPlaceholders})
+          WHERE symbol IN (${symbolPlaceholders})
         `;
 
         const latestHourParams: any[] = [...resolvedSymbols];
@@ -2334,25 +2654,25 @@ async function getNormalizedData(
               SELECT
                 exchange,
                 symbol as original_symbol,
-                normalized_symbol,
+                symbol as normalized_symbol,
                 (minute_timestamp - (minute_timestamp % 3600)) as hour_timestamp,
-                MIN(min_price) as min_price,
-                MAX(max_price) as max_price,
+                AVG(price_low) as min_price,
+                AVG(price_high) as max_price,
                 AVG(avg_mark_price) as mark_price,
                 AVG(avg_index_price) as index_price,
-                SUM(volume_base) as volume_base,
-                SUM(volume_quote) as volume_quote,
-                AVG(avg_open_interest) as open_interest,
+                SUM(sum_volume) as volume_base,
+                0 as volume_quote,
+                0 as open_interest,
                 AVG(avg_open_interest_usd) as open_interest_usd,
-                MAX(max_open_interest_usd) as max_open_interest_usd,
+                0 as max_open_interest_usd,
                 AVG(avg_funding_rate) as funding_rate,
-                AVG(avg_funding_rate_annual) as funding_rate_annual,
-                MIN(min_funding_rate) as min_funding_rate,
-                MAX(max_funding_rate) as max_funding_rate,
+                0 as funding_rate_annual,
+                0 as min_funding_rate,
+                0 as max_funding_rate,
                 SUM(sample_count) as sample_count
               FROM (
                 SELECT * FROM market_stats_1m
-                WHERE normalized_symbol IN (${symbolPlaceholders})
+                WHERE symbol IN (${symbolPlaceholders})
           `;
 
           const recentHourlyParams: any[] = [...resolvedSymbols];

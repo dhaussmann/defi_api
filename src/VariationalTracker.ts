@@ -11,7 +11,7 @@ import {
  *
  * API Details:
  * - Endpoint: GET https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats
- * - Funding Interval: 28800 seconds (8 hours)
+ * - Funding Intervals: Variable per market (1h, 2h, 4h, or 8h) - read from funding_interval_s
  * - Funding Rate Format: Decimal (multiply by 100 for percentage)
  * - Rate Limits: 10 req/10s per IP, 1000 req/min global
  *
@@ -336,12 +336,17 @@ export class VariationalTracker implements DurableObject {
         const openInterestUsd = (totalOI * markPrice).toString();
 
         // Funding Rate normalisieren
-        // Variational: 8-Stunden-Intervall (28800 Sekunden)
-        // WICHTIG: Variational API gibt Rate bereits in Prozent (0.063914 = 0.063914%, nicht 6.3914%)
-        // Wir müssen durch 100 teilen, um auf Dezimalformat zu kommen
-        const fundingRatePercent = parseFloat(getValue(listing.funding_rate, '0'));
-        const fundingRate = fundingRatePercent / 100; // Konvertiere % zu Dezimal
-        const fundingIntervalHours = 8;
+        // Variational: Variable Intervalle (1h, 2h, 4h, 8h) - lese aus API
+        // WICHTIG: Variational API returns value that needs /10 adjustment
+        // Example: API returns 0.090939, website shows 0.0090939%
+        // So: 0.090939 / 10 = 0.0090939 (percent) → / 100 = 0.000090939 (decimal)
+        // Total: divide by 1000
+        const fundingRateFromAPI = parseFloat(listing.funding_rate || '0');
+        const fundingRate = fundingRateFromAPI / 1000; // Convert to decimal
+        
+        // Funding Interval aus API lesen (in Sekunden)
+        const fundingIntervalSeconds = parseInt(listing.funding_interval_s || '28800');
+        const fundingIntervalHours = fundingIntervalSeconds / 3600;
 
         records.push({
           exchange: 'variational',
@@ -355,9 +360,10 @@ export class VariationalTracker implements DurableObject {
           funding_clamp_small: '0',
           funding_clamp_big: '0',
           last_trade_price: markPrice.toString(),
-          current_funding_rate: fundingRate.toString(),
+          current_funding_rate: fundingRate,
           funding_rate: fundingRate.toString(),
           funding_timestamp: recordedAt,
+          funding_interval_hours: fundingIntervalHours as any,
           daily_base_token_volume: volume24h,
           daily_quote_token_volume: volume24h,
           daily_price_low: 0,
@@ -379,10 +385,10 @@ export class VariationalTracker implements DurableObject {
           exchange, symbol, market_id, index_price, mark_price,
           open_interest, open_interest_usd, open_interest_limit, funding_clamp_small,
           funding_clamp_big, last_trade_price, current_funding_rate,
-          funding_rate, funding_timestamp, daily_base_token_volume,
+          funding_rate, funding_timestamp, funding_interval_hours, daily_base_token_volume,
           daily_quote_token_volume, daily_price_low, daily_price_high,
           daily_price_change, recorded_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const batch = records.map((record) =>
@@ -401,6 +407,7 @@ export class VariationalTracker implements DurableObject {
           record.current_funding_rate,
           record.funding_rate,
           record.funding_timestamp,
+          record.funding_interval_hours,
           record.daily_base_token_volume,
           record.daily_quote_token_volume,
           record.daily_price_low,

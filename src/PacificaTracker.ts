@@ -359,16 +359,16 @@ export class PacificaTracker implements DurableObject {
       // Open Interest in USD berechnen: OI * mark price
       const openInterestUsd = parseFloat(data.open_interest) * parseFloat(data.mark);
 
-      const record: any = {
+      const record = {
         exchange: 'pacifica',
         symbol: symbol,
+        market_id: symbol,
         last_trade_price: data.mark,
         index_price: data.oracle,
         mark_price: data.mark,
         open_interest: data.open_interest,
         open_interest_usd: openInterestUsd.toString(),
         funding_rate: data.funding,
-        next_funding_time: null, // Pacifica liefert next_funding rate, nicht time
         volume_24h: data.volume_24h,
         created_at: createdAt,
       };
@@ -386,11 +386,11 @@ export class PacificaTracker implements DurableObject {
         return this.env.DB_WRITE.prepare(
           `INSERT INTO market_stats (
             exchange, symbol, market_id, last_trade_price, index_price, mark_price,
-            open_interest, open_interest_usd, funding_rate, next_funding_time, created_at,
+            open_interest, open_interest_usd, funding_rate, created_at,
             open_interest_limit, funding_clamp_small, funding_clamp_big,
             current_funding_rate, funding_timestamp, daily_base_token_volume,
             daily_quote_token_volume, daily_price_low, daily_price_high, daily_price_change, recorded_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           record.exchange,
           record.symbol,
@@ -401,7 +401,6 @@ export class PacificaTracker implements DurableObject {
           record.open_interest || '0',
           record.open_interest_usd || '0',
           record.funding_rate || '0',
-          record.next_funding_time || '0',
           record.created_at,
           '0', // open_interest_limit
           '0', // funding_clamp_small
