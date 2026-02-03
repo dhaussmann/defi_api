@@ -290,7 +290,7 @@ export async function getCachedArbitrage(
 
   query += ` ORDER BY spread_apr DESC`;
 
-  const result = await env.DB_WRITE.prepare(query).bind(...params).all();
+  const result = await env.DB_READ.prepare(query).bind(...params).all();
 
   if (!result.success || !result.results) {
     throw new Error('Failed to fetch cached arbitrage opportunities');

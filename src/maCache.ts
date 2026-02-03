@@ -47,7 +47,7 @@ export async function calculateAndCacheFundingMAs(env: Env): Promise<void> {
           calculated_at
         )
         SELECT 
-          symbol as normalized_symbol,
+          normalized_symbol,
           exchange,
           ? as timeframe,
           AVG(avg_funding_rate) as avg_funding_rate,
@@ -58,7 +58,7 @@ export async function calculateAndCacheFundingMAs(env: Env): Promise<void> {
         WHERE hour_timestamp >= ?
           AND hour_timestamp <= ?
           AND avg_funding_rate IS NOT NULL
-        GROUP BY symbol, exchange
+        GROUP BY normalized_symbol, exchange
       `;
 
       const result = await env.DB_WRITE.prepare(query)
@@ -147,7 +147,7 @@ export async function getCachedFundingMAs(
 
   query += ` ORDER BY normalized_symbol, exchange, timeframe`;
 
-  const result = await env.DB_WRITE.prepare(query).bind(...params).all();
+  const result = await env.DB_READ.prepare(query).bind(...params).all();
 
   if (!result.success || !result.results) {
     throw new Error('Failed to fetch cached moving averages');
