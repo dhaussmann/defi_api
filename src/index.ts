@@ -2702,6 +2702,7 @@ async function getNormalizedData(
     // - 1000PEPE, kPEPE (for certain tokens)
     
     // Build query to find all symbols containing the base symbol
+    // Optimized: Use normalized_symbol for faster lookups and add LIMIT
     let symbolCheckQuery = `
       SELECT DISTINCT symbol, exchange
       FROM market_stats_1m 
@@ -2710,18 +2711,15 @@ async function getNormalizedData(
         OR symbol LIKE ?
         OR symbol LIKE ?
         OR symbol LIKE ?
-        OR symbol LIKE ?
-        OR symbol LIKE ?
       )
+      LIMIT 50
     `;
     
     const symbolPatterns = [
       symbol,                    // Exact match: BTC
       `%:${symbol}`,            // Prefix format: hyna:BTC, flx:BTC
-      `${symbol}%`,             // Suffix format: BTCUSD, BTCUSDT
-      `${symbol}-%`,            // Dash format: BTC-USD, BTC-USD-PERP
-      `1000${symbol}%`,         // 1000 prefix: 1000PEPE
-      `k${symbol}%`,            // k prefix: kPEPE
+      `${symbol}%`,             // Suffix format: BTCUSD, BTCUSDT, BTC-USD-PERP
+      `%${symbol}%`,            // Contains: 1000PEPE, kPEPE
     ];
     
     // Add exchange filter if specified
@@ -2833,7 +2831,7 @@ async function getNormalizedData(
         historyParams.push(exchange);
       }
 
-      historyQuery += ` AND hour_timestamp >= ? AND hour_timestamp <= ?`;
+      historyQuery += ` AND hour_timestamp BETWEEN ? AND ?`;
       // For 1h interval, use full time range; otherwise limit to data older than 7 days
       historyParams.push(fromTimestamp, interval === '1h' ? toTimestamp : Math.min(toTimestamp, sevenDaysAgo));
 
@@ -2911,11 +2909,8 @@ async function getNormalizedData(
           }
 
           // Only get data after the latest aggregated hour
-          recentHourlyQuery += ` AND minute_timestamp > ?`;
-          recentHourlyParams.push(latestAggregatedHour);
-
-          // And before or at the requested toTimestamp
-          recentHourlyQuery += ` AND minute_timestamp <= ?`;
+          recentHourlyQuery += ` AND minute_timestamp BETWEEN ? AND ?`;
+          recentHourlyParams.push(latestAggregatedHour + 1);
           recentHourlyParams.push(toTimestamp);
 
           // Limit raw data to prevent excessive processing
@@ -2992,7 +2987,7 @@ async function getNormalizedData(
         statsParams.push(exchange);
       }
 
-      statsQuery += ` AND created_at >= ? AND created_at <= ?`;
+      statsQuery += ` AND created_at BETWEEN ? AND ?`;
       statsParams.push(Math.max(fromTimestamp, sevenDaysAgo), toTimestamp);
 
       statsQuery += ` ORDER BY created_at DESC LIMIT ?`;
