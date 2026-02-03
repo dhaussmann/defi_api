@@ -2,18 +2,19 @@
 set -e
 
 API_URL="https://api.hyperliquid.xyz/info"
-DB_NAME="defiapi-db"
+DB_WRITE="defiapi-db-write"
+DB_READ="defiapi-db-read"
 REMOTE="--remote"
 
-# Start from Dec 1, 2025 (when most DEX-specific symbols were listed)
-START_TIME=1733011200000  # Dec 1, 2025 in ms
+# Import last 30 days of data
 CURRENT_TIME=$(date +%s)
+START_TIME=$(( (CURRENT_TIME - 30 * 24 * 60 * 60) * 1000 ))  # 30 days ago in ms
 END_TIME=$(( CURRENT_TIME * 1000 ))
 
 echo "=========================================="
 echo "HIP-3 DEX-Specific Symbols Import"
 echo "=========================================="
-echo "Time range: Dec 1, 2025 - Now"
+echo "Time range: Last 30 days ($(date -u -r $((START_TIME / 1000)) +%Y-%m-%d) to $(date -u +%Y-%m-%d))"
 echo ""
 
 TOTAL_IMPORTED=0
@@ -90,11 +91,11 @@ do
       # Normalized symbol: just "SYMBOL" (e.g., "GOLD")
       NORMALIZED_SYMBOL=$(echo "$COIN_NAME" | sed "s/^${DEX}://")
 
-      # HIP-3: 8-hour intervals = 3 payments/day
-      FUNDING_ANNUAL=$(echo "$FUNDING_RATE * 100 * 3 * 365" | bc -l)
+      # HIP-3: 8-hour intervals = 3 payments/day = rate * 3 * 365
+      FUNDING_ANNUAL=$(echo "$FUNDING_RATE * 3 * 365" | bc -l)
 
       cat >> "$SQL_FILE" <<EOF
-INSERT INTO market_history (
+INSERT OR REPLACE INTO market_history (
   exchange, symbol, normalized_symbol, hour_timestamp,
   avg_mark_price, avg_index_price, avg_funding_rate, avg_funding_rate_annual,
   min_price, max_price, price_volatility,
@@ -104,15 +105,13 @@ INSERT INTO market_history (
   sample_count, aggregated_at
 ) VALUES (
   '$DEX', '$COIN_NAME', '$NORMALIZED_SYMBOL', $HOUR_TIMESTAMP,
-  0.0, 0.0, $FUNDING_RATE, $FUNDING_ANNUAL,
-  0.0, 0.0, 0.0,
-  0.0, 0.0,
-  0.0, 0.0, 0.0,
+  NULL, NULL, $FUNDING_RATE, $FUNDING_ANNUAL,
+  NULL, NULL, NULL,
+  NULL, NULL,
+  NULL, NULL, NULL,
   $FUNDING_RATE, $FUNDING_RATE,
   1, unixepoch('now')
-) ON CONFLICT(exchange, symbol, hour_timestamp) DO UPDATE SET
-  avg_funding_rate = COALESCE(excluded.avg_funding_rate, avg_funding_rate),
-  avg_funding_rate_annual = COALESCE(excluded.avg_funding_rate_annual, avg_funding_rate_annual);
+);
 EOF
     done
 
@@ -121,11 +120,11 @@ EOF
         LINE_COUNT=$(wc -l < "$SQL_FILE")
         RECORD_IMPORT=$((LINE_COUNT / 24))  # Each INSERT is ~24 lines
 
-        if npx wrangler d1 execute "$DB_NAME" $REMOTE --file="$SQL_FILE" > /dev/null 2>&1; then
-          echo "    ✅ Imported $RECORD_IMPORT records"
+        if npx wrangler d1 execute "$DB_WRITE" $REMOTE --file="$SQL_FILE" > /dev/null 2>&1; then
+          echo "    ✅ Imported $RECORD_IMPORT records to DB_WRITE"
           TOTAL_IMPORTED=$((TOTAL_IMPORTED + RECORD_IMPORT))
         else
-          echo "    ⚠️  Import had errors"
+          echo "    ⚠️  Import to DB_WRITE had errors"
         fi
       fi
 
@@ -144,5 +143,8 @@ echo ""
 echo "=========================================="
 echo "Import Complete!"
 echo "=========================================="
-echo "Total records imported: ~$TOTAL_IMPORTED"
+echo "Total records imported to DB_WRITE: ~$TOTAL_IMPORTED"
 echo "Completed at: $(date -u)"
+echo ""
+echo "NOTE: Data is now in DB_WRITE. To make it available via API:"
+echo "  Run sync script or manually sync to DB_READ"

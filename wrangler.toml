@@ -85,15 +85,18 @@ binding = "DB_WRITE"
 database_name = "defiapi-db-write"
 database_id = "e32d9c40-e785-4d6a-a115-97c9ac3fd7c9"
 migrations_dir = "migrations/write"
+remote = true
 
 [[d1_databases]]
 binding = "DB_READ"
 database_name = "defiapi-db-read"
 database_id = "745dab63-261e-4021-985e-d6ad1bcbe75b"
 migrations_dir = "migrations/read"
+remote = true
 
 # Keep old DB as backup during migration
 [[d1_databases]]
 binding = "DB"
 database_name = "defiapi-db"
 database_id = "77ba166f-0989-45d4-aa63-dc4ff0d517cb"
+remote = true

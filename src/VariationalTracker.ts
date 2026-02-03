@@ -346,7 +346,7 @@ export class VariationalTracker implements DurableObject {
         
         // Funding Interval aus API lesen (in Sekunden)
         const fundingIntervalSeconds = parseInt(listing.funding_interval_s || '28800');
-        const fundingIntervalHours = fundingIntervalSeconds / 3600;
+        const fundingIntervalHours = Math.round(fundingIntervalSeconds / 3600);
 
         records.push({
           exchange: 'variational',
@@ -363,7 +363,7 @@ export class VariationalTracker implements DurableObject {
           current_funding_rate: fundingRate,
           funding_rate: fundingRate.toString(),
           funding_timestamp: recordedAt,
-          funding_interval_hours: fundingIntervalHours as any,
+          funding_interval_hours: fundingIntervalHours,
           daily_base_token_volume: volume24h,
           daily_quote_token_volume: volume24h,
           daily_price_low: 0,

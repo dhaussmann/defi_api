@@ -10,16 +10,17 @@
 set -e
 
 API_URL="https://api.hyperliquid.xyz/info"
-DB_NAME="defiapi-db"
+DB_WRITE="defiapi-db-write"
+DB_READ="defiapi-db-read"
 REMOTE="--remote"
 EXCHANGE="hyena"
 
 # Coins to import
 COINS=("BTC" "ETH" "HYPE" "SOL" "LIGHTER" "ZEC")
 
-# Time range (in milliseconds)
-START_TIME=1759269600000  # Start timestamp
-END_TIME=1767430800000    # End timestamp
+# Time range (in milliseconds) - Last 30 days
+START_TIME=1767471900000  # 2026-01-03 09:05:00
+END_TIME=1770063900000    # 2026-02-02 21:25:00
 
 # 15 days in milliseconds
 CHUNK_SIZE=$((15 * 24 * 60 * 60 * 1000))
@@ -46,10 +47,10 @@ echo ""
 
 # Check existing data
 echo "[1/2] Checking existing data..."
-EXISTING_COUNT=$(npx wrangler d1 execute "$DB_NAME" $REMOTE --command "
+EXISTING_COUNT=$(npx wrangler d1 execute "$DB_WRITE" $REMOTE --command "
 SELECT COUNT(*) as cnt FROM market_history WHERE exchange = '$EXCHANGE'
 " --json 2>/dev/null | jq -r '.[] | .results[0].cnt' || echo "0")
-echo "Current records in DB: $EXISTING_COUNT"
+echo "Current records in DB_WRITE: $EXISTING_COUNT"
 echo ""
 
 # Import data
@@ -115,8 +116,8 @@ for COIN in "${COINS[@]}"; do
 
     echo "    Processing $RECORD_COUNT records..."
 
-    # Process each funding rate record
-    echo "$RESPONSE" | jq -c '.[]' | while IFS= read -r record; do
+    # Process each funding rate record using process substitution to avoid subshell
+    while IFS= read -r record; do
       # Extract fields
       TIME=$(echo "$record" | jq -r '.time')
       COIN_NAME=$(echo "$record" | jq -r '.coin')
@@ -140,11 +141,11 @@ for COIN in "${COINS[@]}"; do
 
       # Calculate annual funding rate
       # Hyperliquid/HyENA uses 8-hour intervals = 3 payments per day
-      FUNDING_ANNUAL=$(echo "$FUNDING_RATE * 100 * 3 * 365" | bc -l)
+      FUNDING_ANNUAL=$(echo "$FUNDING_RATE * 3 * 365" | bc -l)
 
       # Create INSERT statement
       cat >> "$SQL_FILE" <<EOF
-INSERT INTO market_history (
+INSERT OR REPLACE INTO market_history (
   exchange, symbol, normalized_symbol, hour_timestamp,
   avg_mark_price, avg_index_price, avg_funding_rate, avg_funding_rate_annual,
   min_price, max_price, price_volatility,
@@ -154,21 +155,17 @@ INSERT INTO market_history (
   sample_count, aggregated_at
 ) VALUES (
   '$EXCHANGE', '$SYMBOL', '$NORMALIZED_SYMBOL', $HOUR_TIMESTAMP,
-  0.0, 0.0, $FUNDING_RATE, $FUNDING_ANNUAL,
-  0.0, 0.0, 0.0,
-  0.0, 0.0,
-  0.0, 0.0, 0.0,
+  NULL, NULL, $FUNDING_RATE, $FUNDING_ANNUAL,
+  NULL, NULL, NULL,
+  NULL, NULL,
+  NULL, NULL, NULL,
   $FUNDING_RATE, $FUNDING_RATE,
   1, unixepoch('now')
-) ON CONFLICT(exchange, symbol, hour_timestamp) DO UPDATE SET
-  avg_funding_rate = COALESCE(avg_funding_rate, $FUNDING_RATE),
-  avg_funding_rate_annual = COALESCE(avg_funding_rate_annual, $FUNDING_ANNUAL),
-  min_funding_rate = COALESCE(min_funding_rate, $FUNDING_RATE),
-  max_funding_rate = COALESCE(max_funding_rate, $FUNDING_RATE);
+);
 EOF
 
       ((COIN_IMPORTED++))
-    done
+    done < <(echo "$RESPONSE" | jq -c '.[]')
 
     echo "    ✓ Processed: $RECORD_COUNT records"
 
@@ -178,8 +175,8 @@ EOF
 
   # Import this coin's data
   if [ -s "$SQL_FILE" ]; then
-    echo "  Importing $COIN_IMPORTED records to database..."
-    npx wrangler d1 execute "$DB_NAME" $REMOTE --file="$SQL_FILE" > /dev/null 2>&1
+    echo "  Importing $COIN_IMPORTED records to DB_WRITE..."
+    npx wrangler d1 execute "$DB_WRITE" $REMOTE --file="$SQL_FILE" > /dev/null 2>&1
     echo "  ✓ Import completed for $COIN"
   else
     echo "  ✗ No data to import for $COIN"
@@ -199,8 +196,11 @@ echo "=========================================="
 echo "Import Summary"
 echo "=========================================="
 echo "Coins processed: ${#COINS[@]}"
-echo "Total records imported: $TOTAL_IMPORTED"
+echo "Total records imported to DB_WRITE: $TOTAL_IMPORTED"
 echo "Total errors: $TOTAL_ERRORS"
 echo ""
 echo "Import completed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo ""
+echo "NOTE: Data is now in DB_WRITE. To make it available via API:"
+echo "  Run sync script or manually sync to DB_READ"
 echo "=========================================="

@@ -16,6 +16,7 @@ import { calculateAllVolatilityMetrics } from './volatility';
 import { calculateAndCacheFundingMAs, getCachedFundingMAs } from './maCache';
 import { calculateAndCacheArbitrage } from './arbitrageCache';
 import { getArbitrageOpportunities } from './arbitrageHandler';
+import { fetchAndSaveVariationalData } from './variationalFetcher';
 
 export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker, VariationalTracker };
 
@@ -27,6 +28,9 @@ export default {
     // Every 5 minutes: Health check + normalized_tokens update + 1-minute aggregation + MA cache + sync aggregations
     if (cronType === '*/5 * * * *') {
       try {
+        console.log('[Cron] Fetching Variational data');
+        await fetchAndSaveVariationalData(env);
+
         console.log('[Cron] Running WebSocket health check');
         await checkTrackerHealth(env);
 
@@ -325,6 +329,222 @@ async function handleApiRoute(
         return Response.json({ success: true, message: 'Arbitrage cache calculation triggered' }, { headers: corsHeaders });
       } catch (error) {
         return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
+      }
+    case '/api/admin/fetch-variational':
+      // Manual trigger for Variational data fetching
+      try {
+        await fetchAndSaveVariationalData(env);
+        return Response.json({ success: true, message: 'Variational data fetched and saved' }, { headers: corsHeaders });
+      } catch (error) {
+        return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
+      }
+    case '/api/admin/check-old-db':
+      // Check data availability in old defiapi-db for Jan 9-29, 2026
+      try {
+        const startTs = 1736726400; // Jan 9, 2026
+        const endTs = 1738195200; // Jan 29, 2026
+        
+        const results: any = { 
+          period: { start: startTs, end: endTs, start_date: '2026-01-09', end_date: '2026-01-29' }
+        };
+        
+        // Check market_history
+        const historyCount = await env.DB.prepare(`
+          SELECT COUNT(*) as count FROM market_history 
+          WHERE hour_timestamp >= ? AND hour_timestamp <= ?
+        `).bind(startTs, endTs).first();
+        results.market_history = historyCount?.count || 0;
+        
+        // Check market_stats_1m
+        const stats1mCount = await env.DB.prepare(`
+          SELECT COUNT(*) as count FROM market_stats_1m 
+          WHERE minute_timestamp >= ? AND minute_timestamp <= ?
+        `).bind(startTs, endTs).first();
+        results.market_stats_1m = stats1mCount?.count || 0;
+        
+        // Check funding_rate_history (uses collected_at in MILLISECONDS!)
+        const startMs = startTs * 1000;
+        const endMs = endTs * 1000;
+        
+        // Get min/max timestamps to understand the data range
+        const timestampRange = await env.DB.prepare(`
+          SELECT 
+            MIN(collected_at) as min_ts,
+            MAX(collected_at) as max_ts,
+            COUNT(*) as total
+          FROM funding_rate_history
+        `).first();
+        results.funding_timestamp_range = {
+          min: timestampRange?.min_ts,
+          max: timestampRange?.max_ts,
+          min_date: timestampRange?.min_ts ? new Date(timestampRange.min_ts).toISOString() : null,
+          max_date: timestampRange?.max_ts ? new Date(timestampRange.max_ts).toISOString() : null,
+          total: timestampRange?.total || 0
+        };
+        
+        const fundingCount = await env.DB.prepare(`
+          SELECT COUNT(*) as count FROM funding_rate_history
+          WHERE collected_at >= ? AND collected_at <= ?
+        `).bind(startMs, endMs).first();
+        results.funding_rate_history = fundingCount?.count || 0;
+        
+        // Get BTC/Hyperliquid count
+        const btcHyperliquidCount = await env.DB.prepare(`
+          SELECT COUNT(*) as count FROM funding_rate_history
+          WHERE symbol = 'BTC' AND exchange = 'hyperliquid'
+            AND collected_at >= ? AND collected_at <= ?
+        `).bind(startMs, endMs).first();
+        results.btc_hyperliquid_funding = btcHyperliquidCount?.count || 0;
+        
+        // Get date breakdown for BTC/Hyperliquid in the requested range
+        const btcDates = await env.DB.prepare(`
+          SELECT DATE(collected_at / 1000, 'unixepoch') as date, COUNT(*) as count
+          FROM funding_rate_history
+          WHERE symbol = 'BTC' AND exchange = 'hyperliquid'
+            AND collected_at >= ? AND collected_at <= ?
+          GROUP BY date
+          ORDER BY date
+        `).bind(startMs, endMs).all();
+        results.btc_hyperliquid_by_date = btcDates.results || [];
+        
+        // Get ALL BTC/Hyperliquid dates to see what's actually in the DB
+        const allBtcDates = await env.DB.prepare(`
+          SELECT 
+            DATE(collected_at / 1000, 'unixepoch') as date, 
+            COUNT(*) as count,
+            MIN(collected_at) as min_ts,
+            MAX(collected_at) as max_ts
+          FROM funding_rate_history
+          WHERE symbol = 'BTC' AND exchange = 'hyperliquid'
+          GROUP BY date
+          ORDER BY date DESC
+          LIMIT 30
+        `).all();
+        results.all_btc_dates_sample = allBtcDates.results || [];
+        
+        // Get exchange breakdown from funding_rate_history
+        const fundingExchanges = await env.DB.prepare(`
+          SELECT exchange, COUNT(*) as count
+          FROM funding_rate_history
+          WHERE collected_at >= ? AND collected_at <= ?
+          GROUP BY exchange
+          ORDER BY count DESC
+        `).bind(startMs, endMs).all();
+        results.funding_exchanges = fundingExchanges.results || [];
+        
+        // Get exchange breakdown
+        const exchangeBreakdown = await env.DB.prepare(`
+          SELECT exchange, COUNT(*) as count 
+          FROM market_history 
+          WHERE hour_timestamp >= ? AND hour_timestamp <= ?
+          GROUP BY exchange
+          ORDER BY count DESC
+        `).bind(startTs, endTs).all();
+        results.exchanges = exchangeBreakdown.results || [];
+        
+        return Response.json({ 
+          success: true,
+          ...results
+        }, { headers: corsHeaders });
+        
+      } catch (error) {
+        console.error('[Check Old DB] Error:', error);
+        return Response.json({ 
+          success: false, 
+          error: error instanceof Error ? error.message : 'Check failed' 
+        }, { status: 500, headers: corsHeaders });
+      }
+    case '/api/admin/sync-db':
+      // Sync recent data from DB_WRITE to DB_READ
+      try {
+        const startTs = parseInt(url.searchParams.get('start') || '1769640000');
+        const limit = parseInt(url.searchParams.get('limit') || '1000');
+        
+        console.log(`[Sync] Copying data from DB_WRITE to DB_READ (start: ${startTs}, limit: ${limit})`);
+        
+        // Read from DB_WRITE (select specific columns to match DB_READ schema)
+        const sourceData = await env.DB_WRITE.prepare(`
+          SELECT 
+            exchange, symbol, normalized_symbol, hour_timestamp,
+            min_price, max_price, avg_mark_price, avg_index_price,
+            price_volatility, volume_base, volume_quote,
+            avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
+            avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
+            sample_count, aggregated_at
+          FROM market_history 
+          WHERE hour_timestamp >= ?
+          ORDER BY hour_timestamp, exchange, symbol
+          LIMIT ?
+        `).bind(startTs, limit).all();
+        
+        if (!sourceData.success || !sourceData.results || sourceData.results.length === 0) {
+          return Response.json({ 
+            success: true, 
+            message: 'No data to sync',
+            synced: 0 
+          }, { headers: corsHeaders });
+        }
+        
+        // Prepare batch insert for DB_READ
+        const records = sourceData.results;
+        let synced = 0;
+        
+        // Insert in smaller batches to avoid timeouts
+        const batchSize = 100;
+        for (let i = 0; i < records.length; i += batchSize) {
+          const batch = records.slice(i, i + batchSize);
+          
+          for (const record of batch) {
+            await env.DB_READ.prepare(`
+              INSERT OR REPLACE INTO market_history (
+                exchange, symbol, normalized_symbol, hour_timestamp,
+                min_price, max_price, avg_mark_price, avg_index_price,
+                price_volatility, volume_base, volume_quote, 
+                avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
+                avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
+                sample_count, aggregated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).bind(
+              record.exchange, 
+              record.symbol,
+              record.normalized_symbol ?? record.symbol,
+              record.hour_timestamp,
+              record.min_price ?? null,
+              record.max_price ?? null,
+              record.avg_mark_price ?? null,
+              record.avg_index_price ?? null,
+              record.price_volatility ?? 0,
+              record.volume_base ?? null,
+              record.volume_quote ?? null,
+              record.avg_open_interest ?? null,
+              record.avg_open_interest_usd ?? null,
+              record.max_open_interest_usd ?? null,
+              record.avg_funding_rate ?? null,
+              record.avg_funding_rate_annual ?? null,
+              record.min_funding_rate ?? null,
+              record.max_funding_rate ?? null,
+              record.sample_count ?? null,
+              record.aggregated_at ?? Math.floor(Date.now() / 1000)
+            ).run();
+            synced++;
+          }
+        }
+        
+        console.log(`[Sync] Successfully synced ${synced} records`);
+        
+        return Response.json({ 
+          success: true, 
+          message: `Synced ${synced} records from DB_WRITE to DB_READ`,
+          synced: synced,
+          nextStart: records[records.length - 1].hour_timestamp
+        }, { headers: corsHeaders });
+        
+      } catch (error) {
+        console.error('[Sync] Error:', error);
+        return Response.json({ 
+          success: false, 
+          error: error instanceof Error ? error.message : 'Sync failed' 
+        }, { status: 500, headers: corsHeaders });
       }
     case '/api/data/24h':
       return await getData24h(env, url, corsHeaders);
@@ -1442,6 +1662,14 @@ async function aggregateOldMarketData(env: Env): Promise<void> {
           WHEN exchange = 'paradex' THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
           WHEN exchange = 'edgex' THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
           WHEN exchange = 'lighter' THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365
+          WHEN exchange = 'variational' THEN
+            CASE
+              WHEN AVG(funding_interval_hours) = 1 THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+              WHEN AVG(funding_interval_hours) = 2 THEN AVG(CAST(funding_rate AS REAL)) * 12 * 365 * 100
+              WHEN AVG(funding_interval_hours) = 4 THEN AVG(CAST(funding_rate AS REAL)) * 6 * 365 * 100
+              WHEN AVG(funding_interval_hours) = 8 THEN AVG(CAST(funding_rate AS REAL)) * 3 * 365 * 100
+              ELSE AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
+            END
           WHEN exchange = 'aster' THEN
             CASE
               WHEN AVG(funding_interval_hours) = 1 THEN AVG(CAST(funding_rate AS REAL)) * 24 * 365 * 100
