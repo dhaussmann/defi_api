@@ -1,0 +1,278 @@
+/**
+ * V2 Aster Data Collector
+ * 
+ * Standalone data collection for Aster funding rates
+ * Features:
+ * - Automatic interval detection (1h, 4h, 8h, etc.) using median of time differences
+ * - Stores 3 values: raw rate, normalized hourly rate, APR
+ * - Isolated table (aster_raw_data)
+ * 
+ * Runs hourly via cron job
+ */
+
+import { Env } from './types';
+
+interface AsterSymbol {
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  contractType: string;
+  status: string;
+}
+
+interface AsterExchangeInfo {
+  symbols: AsterSymbol[];
+}
+
+interface AsterFundingRate {
+  symbol: string;
+  fundingTime: number;
+  fundingRate: string;
+}
+
+/**
+ * Main collection function - called by hourly cron
+ */
+export async function collectAsterData(env: Env): Promise<void> {
+  console.log('[V2 Aster] Starting data collection');
+
+  // Fetch active markets
+  const markets = await fetchActiveMarkets();
+  console.log(`[V2 Aster] Found ${markets.length} active markets`);
+
+  // Get last timestamp from database to determine lookback
+  const lastTimestamp = await env.DB_WRITE.prepare(
+    'SELECT MAX(funding_time) as last_ts FROM aster_raw_data'
+  ).first<{last_ts: number}>();
+
+  const now = Math.floor(Date.now() / 1000);
+  let startTimestamp: number;
+
+  if (lastTimestamp?.last_ts) {
+    // Start from last timestamp minus 2 hours buffer (Aster has variable intervals)
+    startTimestamp = Math.floor(lastTimestamp.last_ts / 1000) - 7200;
+    const hoursBack = (now - startTimestamp) / 3600;
+    console.log(`[V2 Aster] Using dynamic lookback: ${hoursBack.toFixed(1)} hours`);
+  } else {
+    // No data yet, use 48 hour default
+    startTimestamp = now - (48 * 60 * 60);
+    console.log('[V2 Aster] No existing data, using 48 hour lookback');
+  }
+
+  try {
+    await updateTrackerStatus(env, 'running', null);
+
+    // Update market metadata
+    await updateMarketMetadata(env, markets);
+
+    // Collect funding data
+    let totalRecords = 0;
+    const batchSize = 10;
+    
+    for (let i = 0; i < markets.length; i += batchSize) {
+      const batch = markets.slice(i, i + batchSize);
+      const batchPromises = batch.map(market => 
+        collectMarketData(env, market, twoDaysAgo, now)
+      );
+      
+      const results = await Promise.allSettled(batchPromises);
+      
+      results.forEach((result, idx) => {
+        if (result.status === 'fulfilled') {
+          totalRecords += result.value;
+        } else {
+          console.error(`[V2 Aster] Failed to collect ${batch[idx].symbol}:`, result.reason);
+        }
+      });
+      
+      if (i + batchSize < markets.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    const duration = Date.now() - startTime;
+    await updateTrackerStatus(env, 'idle', null);
+    await incrementTrackerStats(env, totalRecords);
+
+    console.log(`[V2 Aster] Collection complete: ${totalRecords} records in ${duration}ms`);
+
+  } catch (error) {
+    console.error('[V2 Aster] Collection failed:', error);
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await updateTrackerStatus(env, 'error', errorMsg);
+    throw error;
+  }
+}
+
+/**
+ * Fetch active perpetual markets from Aster API
+ */
+async function fetchActiveMarkets(): Promise<AsterSymbol[]> {
+  const response = await fetch('https://fapi.asterdex.com/fapi/v1/exchangeInfo');
+  
+  if (!response.ok) {
+    throw new Error(`Failed to fetch markets: ${response.status}`);
+  }
+
+  const data = await response.json() as AsterExchangeInfo;
+  return data.symbols.filter(s => 
+    s.contractType === 'PERPETUAL' && 
+    s.status === 'TRADING'
+  );
+}
+
+/**
+ * Update market metadata
+ */
+async function updateMarketMetadata(env: Env, markets: AsterSymbol[]): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  
+  const statements = markets.map(market => 
+    env.DB_WRITE.prepare(`
+      INSERT OR REPLACE INTO aster_markets (
+        symbol, base_asset, quote_asset, contract_type, status, last_updated
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      market.symbol,
+      market.baseAsset,
+      market.quoteAsset,
+      market.contractType,
+      market.status,
+      now
+    )
+  );
+
+  await env.DB_WRITE.batch(statements);
+  console.log(`[V2 Aster] Updated ${markets.length} markets`);
+}
+
+/**
+ * Collect funding data for a single market with automatic interval detection
+ */
+async function collectMarketData(
+  env: Env,
+  market: AsterSymbol,
+  startTime: number,
+  endTime: number
+): Promise<number> {
+  try {
+    // Fetch funding history via proxy
+    const url = `https://aster.wirewaving.workers.dev?symbol=${market.symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status}`);
+    }
+
+    const data = await response.json() as AsterFundingRate[];
+
+    if (!data || data.length === 0) {
+      return 0;
+    }
+
+    // Sort by funding time
+    data.sort((a, b) => a.fundingTime - b.fundingTime);
+
+    // Automatic interval detection using median of time differences
+    const intervals = data
+      .map((d, i, arr) => i > 0 ? d.fundingTime - arr[i - 1].fundingTime : null)
+      .filter((interval): interval is number => interval !== null && interval > 0);
+
+    let intervalHours = 1; // Default
+    let eventsPerYear = 365 * 24; // Default for 1h
+
+    if (intervals.length > 0) {
+      // Calculate median interval
+      intervals.sort((a, b) => a - b);
+      const medianInterval = intervals[Math.floor(intervals.length / 2)];
+      
+      // Convert to hours (rounded)
+      intervalHours = Math.round(medianInterval / (60 * 60 * 1000));
+      
+      // Calculate events per year
+      eventsPerYear = 365 * (24 / intervalHours);
+    }
+
+    // Update market with detected interval
+    await env.DB_WRITE.prepare(`
+      UPDATE aster_markets 
+      SET detected_interval_hours = ?, last_interval_update = ?
+      WHERE symbol = ?
+    `).bind(intervalHours, Math.floor(Date.now() / 1000), market.symbol).run();
+
+    const collectedAt = Math.floor(Date.now() / 1000);
+    const statements = data.map(funding => {
+      const rateRaw = parseFloat(funding.fundingRate);
+      const rateRawPercent = rateRaw * 100;
+      const rateHourly = rateRawPercent / intervalHours; // Normalized to 1h
+      const rateAnnual = rateRawPercent * eventsPerYear;
+
+      return env.DB_WRITE.prepare(`
+        INSERT OR REPLACE INTO aster_raw_data (
+          symbol, base_asset, funding_time,
+          rate_raw, rate_raw_percent,
+          rate_hourly, rate_annual,
+          interval_hours, events_per_year,
+          collected_at, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        market.symbol,
+        market.baseAsset,
+        funding.fundingTime,
+        rateRaw,
+        rateRawPercent,
+        rateHourly,
+        rateAnnual,
+        intervalHours,
+        eventsPerYear,
+        collectedAt,
+        'api'
+      );
+    });
+
+    await env.DB_WRITE.batch(statements);
+
+    console.log(`[V2 Aster] ${market.symbol}: ${data.length} records (${intervalHours}h interval)`);
+    return data.length;
+
+  } catch (error) {
+    console.error(`[V2 Aster] Error collecting ${market.symbol}:`, error);
+    return 0;
+  }
+}
+
+/**
+ * Update tracker status
+ */
+async function updateTrackerStatus(
+  env: Env,
+  status: 'idle' | 'running' | 'error',
+  error: string | null
+): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  
+  if (status === 'idle' || status === 'running') {
+    await env.DB_WRITE.prepare(`
+      UPDATE aster_tracker_status 
+      SET status = ?, last_run = ?, last_success = ?, last_error = NULL
+      WHERE id = 1
+    `).bind(status, now, now).run();
+  } else {
+    await env.DB_WRITE.prepare(`
+      UPDATE aster_tracker_status 
+      SET status = ?, last_run = ?, last_error = ?
+      WHERE id = 1
+    `).bind(status, now, error).run();
+  }
+}
+
+/**
+ * Increment tracker statistics
+ */
+async function incrementTrackerStats(env: Env, recordCount: number): Promise<void> {
+  await env.DB_WRITE.prepare(`
+    UPDATE aster_tracker_status 
+    SET total_runs = total_runs + 1, total_records = total_records + ?
+    WHERE id = 1
+  `).bind(recordCount).run();
+}

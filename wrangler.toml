@@ -66,7 +66,7 @@ new_classes = ["VariationalTracker"]
 [vars]
 SNAPSHOT_INTERVAL_MS = "15000"
 
-# Cron Triggers - Two-Tier Aggregation System
+# Cron Triggers - Multi-Schedule System
 # 1. Every 5 minutes: Health check + tokens update + 1-minute aggregation
 #    - WebSocket health monitoring (Lighter, Paradex, Pacifica, EdgeX)
 #    - Updates normalized_tokens table (825 UPSERTs × 12 = 9,900/hour)
@@ -76,8 +76,22 @@ SNAPSHOT_INTERVAL_MS = "15000"
 #    - Aggregates 1-minute data → hourly aggregates (data >1h old)
 #    - Deletes aggregated 1-minute data (reduces DB by ~60×)
 #    - Final compression: 240× reduction (15s → 1h via 1m intermediate)
+# 3. V2 Exchange Collection (Separate schedules to avoid timeouts):
+#    - 2 * * * *: Binance (581 symbols, slowest)
+#    - 7 * * * *: Extended (269 markets)
+#    - 12 * * * *: Hyperliquid (190 coins)
+#    - 17 * * * *: Lighter (105 markets)
+#    - 22 * * * *: Aster (169 markets, variable intervals)
+# Cron schedules:
+# - */5 * * * *: 5-minute tasks (health check, tokens update, 1m aggregation)
+# - 0 * * * *: Hourly aggregation and cleanup
+# - 2 * * * *: V2 Binance collection (581 symbols)
+# - 7 * * * *: V2 Extended collection (269 markets)
+# - 12 * * * *: V2 Hyperliquid collection (190 coins)
+# - 17 * * * *: V2 Lighter collection (105 markets)
+# - 22 * * * *: V2 Aster collection (169 markets)
 [triggers]
-crons = ["*/5 * * * *", "0 * * * *"]
+crons = ["*/5 * * * *", "0 * * * *", "5 * * * *", "10 * * * *"]
 
 # D1 Databases - 2-DB Architecture for Load Distribution
 [[d1_databases]]
@@ -99,4 +113,11 @@ remote = true
 binding = "DB"
 database_name = "defiapi-db"
 database_id = "77ba166f-0989-45d4-aa63-dc4ff0d517cb"
+remote = true
+
+# Unified Funding Rates Database - Separate DB for V3 aggregated data
+[[d1_databases]]
+binding = "DB_UNIFIED"
+database_name = "defiapi-unified-funding"
+database_id = "1d30f80b-a06a-423d-855e-21c3cddb2ce9"
 remote = true

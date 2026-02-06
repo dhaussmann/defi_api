@@ -336,10 +336,11 @@ export interface Env {
   KM_TRACKER: DurableObjectNamespace;
   VARIATIONAL_TRACKER: DurableObjectNamespace;
   
-  // 2-DB Architecture
-  DB_WRITE: D1Database;   // Hot data: market_stats, aggregates, tracker_status
-  DB_READ: D1Database;    // API queries: normalized_tokens
-  DB: D1Database;         // Backup: Keep old DB during migration
+  // 3-DB Architecture
+  DB_WRITE: D1Database;    // Hot data: market_stats, aggregates, tracker_status, V3 tables
+  DB_READ: D1Database;     // API queries: normalized_tokens
+  DB_UNIFIED: D1Database;  // V3 aggregated data: unified_funding_rates (cross-exchange)
+  DB: D1Database;          // Backup: Keep old DB during migration
   SNAPSHOT_INTERVAL_MS?: string;
 }
 

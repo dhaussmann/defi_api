@@ -17,6 +17,10 @@ import { calculateAndCacheFundingMAs, getCachedFundingMAs } from './maCache';
 import { calculateAndCacheArbitrage } from './arbitrageCache';
 import { getArbitrageOpportunities } from './arbitrageHandler';
 import { fetchAndSaveVariationalData } from './variationalFetcher';
+import { exportAllTrackerData, exportTrackerDataForExchange } from '../v3_collectors/TrackerDataExporter';
+import { handleFundingRates, handleFundingAPR, handleFundingSummary } from './v3Api';
+import { syncAllV3ToUnified, getUnifiedFundingStats, queryUnifiedFundingRates } from './unifiedFundingSync';
+import { calculateFundingMA, queryFundingMA, getLatestMA } from './fundingMA';
 
 export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker, VariationalTracker };
 
@@ -58,6 +62,17 @@ export default {
       }
     }
 
+    // Every hour at :10: Calculate moving averages
+    if (cronType === '10 * * * *') {
+      try {
+        console.log('[Cron] Starting moving average calculation');
+        const maResult = await calculateFundingMA(env);
+        console.log('[Cron] Moving average calculation completed:', maResult);
+      } catch (error) {
+        console.error('[Cron] Error in MA calculation:', error);
+      }
+    }
+
     // Every hour: Aggregate 1m data to hourly and clean up
     if (cronType === '0 * * * *') {
       try {
@@ -92,6 +107,43 @@ export default {
     }
 
     try {
+      // V3 API endpoints - handle BEFORE other routes
+      if (path === '/api/v3/funding/rates') {
+        return await handleFundingRates(env, url.searchParams);
+      } else if (path === '/api/v3/funding/apr') {
+        return await handleFundingAPR(env, url.searchParams);
+      } else if (path === '/api/v3/funding/summary') {
+        return await handleFundingSummary(env, url.searchParams);
+      } else if (path === '/api/v3/funding/ma') {
+        const symbol = url.searchParams.get('symbol');
+        const period = url.searchParams.get('period');
+        const exchange = url.searchParams.get('exchange') || 'all';
+        const limit = parseInt(url.searchParams.get('limit') || '24', 10);
+
+        if (!symbol) {
+          return Response.json({ success: false, error: 'Symbol parameter is required' }, { status: 400, headers: corsHeaders });
+        }
+        if (!period) {
+          return Response.json({ success: false, error: 'Period parameter is required (1h, 24h, 3d, 7d, 14d, 30d)' }, { status: 400, headers: corsHeaders });
+        }
+        if (!['1h', '24h', '3d', '7d', '14d', '30d'].includes(period)) {
+          return Response.json({ success: false, error: 'Invalid period. Use: 1h, 24h, 3d, 7d, 14d, 30d' }, { status: 400, headers: corsHeaders });
+        }
+
+        const result = await queryFundingMA(env, symbol, period, exchange, limit);
+        return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/api/v3/funding/ma/latest') {
+        const symbol = url.searchParams.get('symbol');
+        const exchange = url.searchParams.get('exchange') || 'all';
+
+        if (!symbol) {
+          return Response.json({ success: false, error: 'Symbol parameter is required' }, { status: 400, headers: corsHeaders });
+        }
+
+        const result = await getLatestMA(env, symbol, exchange);
+        return Response.json(result, { headers: corsHeaders });
+      }
+
       // Trackers auto-start themselves via their fetch() methods
       // No need to ping them on every request - removed ensureTrackersStarted()
 
@@ -115,6 +167,11 @@ export default {
         console.log('[Debug] Manually triggering hourly aggregation');
         await aggregateTo1Hour(env);
         return Response.json({ success: true, message: 'Hourly aggregation triggered' }, { headers: corsHeaders });
+      } else if (path === '/debug/calculate-ma') {
+        // Debug endpoint to manually trigger MA calculation
+        console.log('[Debug] Manually triggering MA calculation');
+        const result = await calculateFundingMA(env);
+        return Response.json(result, { headers: corsHeaders });
       } else if (path === '/debug/check-db-write') {
         const now = Math.floor(Date.now() / 1000);
         const result = await env.DB_WRITE.prepare('SELECT COUNT(*) as count, MAX(created_at) as latest FROM market_stats').first();
@@ -297,12 +354,6 @@ async function handleApiRoute(
       return await getMarketHistory(env, url, corsHeaders);
     case '/api/volatility':
       return await getVolatility(env, url, corsHeaders);
-    case '/api/normalized-data':
-      return await getNormalizedData(env, url, corsHeaders);
-    case '/api/funding/ma':
-      return await getFundingMovingAverages(env, url, corsHeaders);
-    case '/api/funding/ma/bulk':
-      return await getBulkFundingMovingAverages(env, url, corsHeaders);
     case '/api/funding/arbitrage':
       return await getArbitrageOpportunities(env, url, corsHeaders);
     case '/api/admin/cache-ma':

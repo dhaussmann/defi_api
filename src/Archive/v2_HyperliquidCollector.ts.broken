@@ -1,0 +1,221 @@
+/**
+ * V2 Hyperliquid Data Collector
+ * 
+ * Standalone data collection for Hyperliquid funding rates
+ * Features:
+ * - 1-hour intervals
+ * - Stores raw rate, rate as percent, and APR
+ * - Isolated table (hyperliquid_raw_data)
+ * 
+ * Runs hourly via cron job
+ */
+
+import { Env } from './types';
+
+interface HyperliquidMeta {
+  universe: Array<{
+    name: string;
+    szDecimals: number;
+    isDelisted?: boolean;
+  }>;
+}
+
+interface HyperliquidFundingRate {
+  time: number;
+  fundingRate: string;
+}
+
+/**
+ * Main collection function - called by hourly cron
+ */
+export async function collectHyperliquidData(env: Env): Promise<void> {
+  console.log('[V2 Hyperliquid] Starting data collection');
+
+  // Update coin metadata
+  await updateCoinMetadata(env);
+
+  // Fetch active coins
+  const coins = await fetchActiveCoins();
+  console.log(`[V2 Hyperliquid] Found ${coins.length} active coins`);
+
+  // Get last timestamp from database to determine lookback
+  const lastTimestamp = await env.DB_WRITE.prepare(
+    'SELECT MAX(timestamp) as last_ts FROM hyperliquid_raw_data'
+  ).first<{last_ts: number}>();
+      try {
+        const records = await collectCoinData(env, coin, twoHoursAgo, now);
+        totalRecords += records;
+      } catch (error) {
+        console.error(`[V2 Hyperliquid] Failed to collect ${coin}:`, error);
+      }
+      
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+
+    const duration = Date.now() - startTime;
+    await updateTrackerStatus(env, 'idle', null);
+    await incrementTrackerStats(env, totalRecords);
+
+    console.log(`[V2 Hyperliquid] Collection complete: ${totalRecords} records in ${duration}ms`);
+
+  } catch (error) {
+    console.error('[V2 Hyperliquid] Collection failed:', error);
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await updateTrackerStatus(env, 'error', errorMsg);
+    throw error;
+  }
+}
+
+/**
+ * Fetch all active coins from Hyperliquid API
+ */
+async function fetchActiveCoins(): Promise<string[]> {
+  try {
+    const response = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'meta' })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Meta API error: ${response.status}`);
+    }
+
+    const data = await response.json() as HyperliquidMeta;
+    
+    if (!data.universe || !Array.isArray(data.universe)) {
+      throw new Error('Invalid meta API response');
+    }
+
+    // Extract coin names, excluding delisted coins
+    const coins = data.universe
+      .filter(item => !item.isDelisted)
+      .map(item => item.name);
+    return coins;
+  } catch (error) {
+    console.error('[V2 Hyperliquid] Failed to fetch coins:', error);
+    // Fallback to known coins if API fails
+    return ['BTC', 'ETH', 'SOL', 'ARB'];
+  }
+}
+
+/**
+ * Update market metadata
+ */
+async function updateMarketMetadata(env: Env, coins: string[]): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  
+  const statements = coins.map(coin => {
+    return env.DB_WRITE.prepare(`
+      INSERT OR REPLACE INTO hyperliquid_markets (symbol, status, last_updated)
+      VALUES (?, ?, ?)
+    `).bind(coin, 'active', now);
+  });
+
+  await env.DB_WRITE.batch(statements);
+  console.log(`[V2 Hyperliquid] Updated ${coins.length} markets`);
+}
+
+/**
+ * Collect funding data for a single coin
+ */
+async function collectCoinData(
+  env: Env,
+  coin: string,
+  startTime: number,
+  endTime: number
+): Promise<number> {
+  try {
+    const response = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'fundingHistory',
+        coin: coin,
+        startTime: startTime,
+        endTime: endTime
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (!Array.isArray(data) || data.length === 0) {
+      return 0;
+    }
+
+    const fundingRates = data as HyperliquidFundingRate[];
+    const collectedAt = Math.floor(Date.now() / 1000);
+    
+    const statements = fundingRates.map(funding => {
+      const rate = parseFloat(funding.fundingRate);
+      const ratePercent = rate * 100;
+      const rateAnnual = rate * 24 * 365 * 100;  // APR in percent
+
+      return env.DB_WRITE.prepare(`
+        INSERT OR REPLACE INTO hyperliquid_raw_data (
+          symbol, timestamp,
+          rate, rate_percent, rate_annual,
+          collected_at, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        coin,
+        funding.time,
+        rate,
+        ratePercent,
+        rateAnnual,
+        collectedAt,
+        'api'
+      );
+    });
+
+    await env.DB_WRITE.batch(statements);
+
+    console.log(`[V2 Hyperliquid] ${coin}: ${fundingRates.length} records`);
+    return fundingRates.length;
+
+  } catch (error) {
+    console.error(`[V2 Hyperliquid] Error collecting ${coin}:`, error);
+    return 0;
+  }
+}
+
+/**
+ * Update tracker status
+ */
+async function updateTrackerStatus(
+  env: Env,
+  status: 'idle' | 'running' | 'error',
+  error: string | null
+): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  
+  if (status === 'idle' || status === 'running') {
+    await env.DB_WRITE.prepare(`
+      UPDATE hyperliquid_tracker_status 
+      SET status = ?, last_run = ?, last_success = ?, last_error = NULL
+      WHERE id = 1
+    `).bind(status, now, now).run();
+  } else {
+    await env.DB_WRITE.prepare(`
+      UPDATE hyperliquid_tracker_status 
+      SET status = ?, last_run = ?, last_error = ?
+      WHERE id = 1
+    `).bind(status, now, error).run();
+  }
+}
+
+/**
+ * Increment tracker statistics
+ */
+async function incrementTrackerStats(env: Env, recordCount: number): Promise<void> {
+  await env.DB_WRITE.prepare(`
+    UPDATE hyperliquid_tracker_status 
+    SET total_runs = total_runs + 1, total_records = total_records + ?
+    WHERE id = 1
+  `).bind(recordCount).run();
+}
