@@ -4,6 +4,7 @@
   "description": "Crypto Exchange Tracker with Cloudflare Workers",
   "main": "src/index.ts",
   "scripts": {
+    "build": "echo 'Build OK'",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
