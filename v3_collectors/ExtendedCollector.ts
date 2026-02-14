@@ -137,11 +137,13 @@ async function collectMarketDataOptimized(
   }
 
   const stats = marketData.marketStats;
-  // Convert timestamp from milliseconds to seconds
-  const fundingTime = Math.floor(stats.nextFundingRate / 1000) || collectedAt;
+  // Use nextFundingRate minus 1 hour as funding_time
+  // nextFundingRate is in milliseconds, convert to seconds and subtract 3600 seconds (1 hour)
+  const fundingTime = stats.nextFundingRate ? Math.floor(stats.nextFundingRate / 1000) - 3600 : collectedAt;
   
-  // Parse rate and calculate using exchange config
+  // Parse rate and open interest
   const rateRaw = parseFloat(stats.fundingRate);
+  const openInterest = stats.openInterest ? parseFloat(stats.openInterest) : null;
   const rates = calculateRates(rateRaw, CONFIG.defaultIntervalHours, EXCHANGE_NAME);
   
   // Validate rate
@@ -157,8 +159,8 @@ async function collectMarketDataOptimized(
   // Insert into V3 table
   await env.DB_WRITE.prepare(`
     INSERT OR REPLACE INTO extended_funding_v3 
-    (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source, open_interest)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     market.name,
     market.assetName,
@@ -169,7 +171,8 @@ async function collectMarketDataOptimized(
     rates.rate1hPercent,
     rates.rateApr,
     collectedAt,
-    'api'
+    'api',
+    openInterest
   ).run();
 
   return 1;
@@ -280,6 +283,9 @@ async function importMarketHistory(
           return null;
         }
         
+        // Use item.T (timestamp in seconds) minus 1 hour for funding_time
+        const fundingTime = item.T - 3600;
+        
         return env.DB_WRITE.prepare(`
           INSERT OR REPLACE INTO extended_funding_v3 
           (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
@@ -287,7 +293,7 @@ async function importMarketHistory(
         `).bind(
           market.name,
           market.assetName,
-          item.T,
+          fundingTime,
           rates.rateRaw,
           rates.rateRawPercent,
           CONFIG.defaultIntervalHours,

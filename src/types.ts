@@ -341,6 +341,7 @@ export interface Env {
   DB_READ: D1Database;     // API queries: normalized_tokens
   DB_UNIFIED: D1Database;  // V3 aggregated data: unified_funding_rates (cross-exchange)
   DB: D1Database;          // Backup: Keep old DB during migration
+  CACHE: KVNamespace;      // KV Cache for API responses
   SNAPSHOT_INTERVAL_MS?: string;
 }
 

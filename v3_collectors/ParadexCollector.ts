@@ -92,6 +92,30 @@ async function fetchMarketFundingRate(symbol: string): Promise<ParadexFundingDat
 }
 
 /**
+ * Fetch open interest for all markets via /v1/markets/summary
+ */
+async function fetchOpenInterest(): Promise<Map<string, number | null>> {
+  const oiMap = new Map<string, number | null>();
+  try {
+    const response = await fetch(`${CONFIG.apiBaseUrl}/v1/markets/summary?market=ALL`, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+    if (!response.ok) return oiMap;
+    const data = await response.json() as { results: Array<{ symbol: string; open_interest?: string }> };
+    if (data.results) {
+      for (const item of data.results) {
+        const oi = item.open_interest ? parseFloat(item.open_interest) : null;
+        oiMap.set(item.symbol, oi && !isNaN(oi) ? oi : null);
+      }
+    }
+  } catch (e) {
+    console.warn('[V3 Paradex] Failed to fetch OI:', e);
+  }
+  return oiMap;
+}
+
+/**
  * Extract base asset from symbol (e.g., "BTC-USD-PERP" -> "BTC")
  */
 function extractBaseAsset(symbol: string): string {
@@ -115,6 +139,10 @@ export async function collectParadexV3(env: Env): Promise<void> {
       return;
     }
     
+    // Fetch open interest for all markets
+    const oiMap = await fetchOpenInterest();
+    console.log(`[V3 Paradex] Fetched OI for ${oiMap.size} markets`);
+
     // Fetch funding rates for all markets
     const statements: any[] = [];
     let successCount = 0;
@@ -151,11 +179,13 @@ export async function collectParadexV3(env: Env): Promise<void> {
         // Use current timestamp as funding_time
         const fundingTime = collectedAt;
         
+        const openInterest = oiMap.get(symbol) ?? null;
+
         statements.push(
           env.DB_WRITE.prepare(`
             INSERT OR REPLACE INTO paradex_funding_v3 
-            (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source, open_interest)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
             symbol,
             baseAsset,
@@ -166,7 +196,8 @@ export async function collectParadexV3(env: Env): Promise<void> {
             rates.rate1hPercent,
             rates.rateApr,
             collectedAt,
-            'api'
+            'api',
+            openInterest
           )
         );
         

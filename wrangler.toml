@@ -3,63 +3,13 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Durable Objects
-[durable_objects]
-bindings = [
-  { name = "LIGHTER_TRACKER", class_name = "LighterTracker" },
-  { name = "PARADEX_TRACKER", class_name = "ParadexTracker" },
-  { name = "HYPERLIQUID_TRACKER", class_name = "HyperliquidTracker" },
-  { name = "EDGEX_TRACKER", class_name = "EdgeXTracker" },
-  { name = "ASTER_TRACKER", class_name = "AsterTracker" },
-  { name = "PACIFICA_TRACKER", class_name = "PacificaTracker" },
-  { name = "EXTENDED_TRACKER", class_name = "ExtendedTracker" },
-  { name = "HYENA_TRACKER", class_name = "HyENATracker" },
-  { name = "XYZ_TRACKER", class_name = "XYZTracker" },
-  { name = "FLX_TRACKER", class_name = "FLXTracker" },
-  { name = "VNTL_TRACKER", class_name = "VNTLTracker" },
-  { name = "KM_TRACKER", class_name = "KMTracker" },
-  { name = "VARIATIONAL_TRACKER", class_name = "VariationalTracker" }
-]
+# Old Durable Objects removed - using V3 collectors instead
+# Tracker files archived in src/Archive/old_trackers/
 
+# Migration to delete old Durable Objects
 [[migrations]]
-tag = "v1"
-new_classes = ["LighterTracker"]
-
-[[migrations]]
-tag = "v2"
-new_classes = ["ParadexTracker"]
-
-[[migrations]]
-tag = "v3"
-new_classes = ["HyperliquidTracker"]
-
-[[migrations]]
-tag = "v4"
-new_classes = ["EdgeXTracker"]
-
-[[migrations]]
-tag = "v5"
-new_classes = ["AsterTracker"]
-
-[[migrations]]
-tag = "v6"
-new_classes = ["PacificaTracker"]
-
-[[migrations]]
-tag = "v7"
-new_classes = ["ExtendedTracker"]
-
-[[migrations]]
-tag = "v8"
-new_classes = ["HyENATracker"]
-
-[[migrations]]
-tag = "v9"
-new_classes = ["XYZTracker", "FLXTracker", "VNTLTracker", "KMTracker"]
-
-[[migrations]]
-tag = "v10"
-new_classes = ["VariationalTracker"]
+tag = "v11"
+deleted_classes = ["LighterTracker", "ParadexTracker", "HyperliquidTracker", "EdgeXTracker", "AsterTracker", "PacificaTracker", "ExtendedTracker", "HyENATracker", "XYZTracker", "FLXTracker", "VNTLTracker", "KMTracker", "VariationalTracker"]
 
 
 # Environment Variables (optional)
@@ -121,3 +71,8 @@ binding = "DB_UNIFIED"
 database_name = "defiapi-unified-funding"
 database_id = "1d30f80b-a06a-423d-855e-21c3cddb2ce9"
 remote = true
+
+# KV Cache for API responses
+[[kv_namespaces]]
+binding = "CACHE"
+id = "8124b8328dbd42619880990694a98b9f"

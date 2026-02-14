@@ -55,6 +55,32 @@ async function fetchActiveCoins(): Promise<string[]> {
 }
 
 /**
+ * Fetch open interest for all coins via metaAndAssetCtxs
+ */
+async function fetchOpenInterest(): Promise<Map<string, number | null>> {
+  const response = await fetch(`${CONFIG.apiBaseUrl}/info`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'metaAndAssetCtxs' })
+  });
+
+  const oiMap = new Map<string, number | null>();
+  if (!response.ok) return oiMap;
+
+  const data = await response.json() as [HyperliquidMeta, Array<{ openInterest?: string }>];
+  if (!Array.isArray(data) || data.length < 2) return oiMap;
+
+  const [meta, assetCtxs] = data;
+  meta.universe.forEach((coin, idx) => {
+    const ctx = assetCtxs[idx];
+    const oi = ctx?.openInterest ? parseFloat(ctx.openInterest) : null;
+    oiMap.set(coin.name, oi && !isNaN(oi) ? oi : null);
+  });
+
+  return oiMap;
+}
+
+/**
  * Main collection function - collects current funding rates
  */
 export async function collectHyperliquidV3(env: Env): Promise<void> {
@@ -68,6 +94,10 @@ export async function collectHyperliquidV3(env: Env): Promise<void> {
     let totalRecords = 0;
     const collectedAt = Math.floor(Date.now() / 1000);
 
+    // Fetch open interest for all coins
+    const oiMap = await fetchOpenInterest();
+    console.log(`[V3 Hyperliquid] Fetched OI for ${oiMap.size} coins`);
+
     // Collect data for last 1.5 hours (safety buffer for hourly cron)
     const now = Date.now();
     const startTime = now - (90 * 60 * 1000);
@@ -79,7 +109,7 @@ export async function collectHyperliquidV3(env: Env): Promise<void> {
       console.log(`[V3 Hyperliquid] Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(coins.length / BATCH_SIZE)}`);
 
       const results = await Promise.allSettled(
-        batch.map(coin => collectCoinData(env, coin, startTime, now, collectedAt))
+        batch.map(coin => collectCoinData(env, coin, startTime, now, collectedAt, oiMap.get(coin) ?? null))
       );
 
       results.forEach((result, idx) => {
@@ -105,7 +135,8 @@ async function collectCoinData(
   coin: string,
   startTime: number,
   endTime: number,
-  collectedAt: number
+  collectedAt: number,
+  openInterest: number | null
 ): Promise<number> {
   const response = await fetch(`${CONFIG.apiBaseUrl}/info`, {
     method: 'POST',
@@ -148,8 +179,8 @@ async function collectCoinData(
 
       return env.DB_WRITE.prepare(`
         INSERT OR REPLACE INTO hyperliquid_funding_v3 
-        (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source, open_interest)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         coin,
         coin,
@@ -160,7 +191,8 @@ async function collectCoinData(
         rates.rate1hPercent,
         rates.rateApr,
         collectedAt,
-        'api'
+        'api',
+        openInterest
       );
     })
     .filter(stmt => stmt !== null) as any[];

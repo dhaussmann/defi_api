@@ -116,8 +116,9 @@ export async function collectVentualsV3(env: Env): Promise<void> {
       const symbol = universeItem.name;
       const baseAsset = extractBaseAsset(symbol);
       
-      // Parse funding rate
+      // Parse funding rate and open interest
       const rateRaw = parseFloat(assetCtx.funding || '0');
+      const openInterest = assetCtx.openInterest ? parseFloat(assetCtx.openInterest) : null;
       
       // Calculate rates using config system
       const rates = calculateRates(rateRaw, CONFIG.defaultIntervalHours, EXCHANGE_NAME);
@@ -138,8 +139,8 @@ export async function collectVentualsV3(env: Env): Promise<void> {
       statements.push(
         env.DB_WRITE.prepare(`
           INSERT OR REPLACE INTO ventuals_funding_v3 
-          (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source, open_interest)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).bind(
           symbol,
           baseAsset,
@@ -150,7 +151,8 @@ export async function collectVentualsV3(env: Env): Promise<void> {
           rates.rate1hPercent,
           rates.rateApr,
           collectedAt,
-          'api'
+          'api',
+          openInterest
         )
       );
     }

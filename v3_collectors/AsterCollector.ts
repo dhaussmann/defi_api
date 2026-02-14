@@ -88,6 +88,30 @@ function calculateIntervalHours(fundings: AsterFundingRate[]): number {
 }
 
 /**
+ * Fetch open interest for all markets in batches
+ */
+async function fetchOpenInterest(markets: AsterMarket[]): Promise<Map<string, number | null>> {
+  const oiMap = new Map<string, number | null>();
+  const BATCH_SIZE = 10;
+  for (let i = 0; i < markets.length; i += BATCH_SIZE) {
+    const batch = markets.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(async (m) => {
+        const resp = await fetch(`${CONFIG.apiBaseUrl}/openInterest?symbol=${m.symbol}`);
+        if (!resp.ok) return { symbol: m.symbol, oi: null };
+        const data = await resp.json() as { symbol: string; openInterest?: string };
+        const oi = data.openInterest ? parseFloat(data.openInterest) : null;
+        return { symbol: m.symbol, oi: oi && !isNaN(oi) ? oi : null };
+      })
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled') oiMap.set(r.value.symbol, r.value.oi);
+    }
+  }
+  return oiMap;
+}
+
+/**
  * Main collection function - collects current funding rates
  */
 export async function collectAsterV3(env: Env): Promise<void> {
@@ -100,6 +124,10 @@ export async function collectAsterV3(env: Env): Promise<void> {
 
     let totalRecords = 0;
     const collectedAt = Math.floor(Date.now() / 1000);
+
+    // OI fetch disabled - per-symbol calls (~81) push cron over 1000 subrequest limit
+    // TODO: Re-enable when Aster provides a bulk OI endpoint
+    const oiMap = new Map<string, number | null>();
 
     // Collect data for last 48 hours (to calculate interval)
     const now = Date.now(); // milliseconds
@@ -114,7 +142,7 @@ export async function collectAsterV3(env: Env): Promise<void> {
       // Process batch sequentially to avoid DB batch size limits
       for (const market of batch) {
         try {
-          const records = await collectMarketData(env, market, startTime, now, collectedAt);
+          const records = await collectMarketData(env, market, startTime, now, collectedAt, oiMap.get(market.symbol) ?? null);
           totalRecords += records;
         } catch (error) {
           console.error(`[V3 Aster] Error collecting ${market.symbol}:`, error);
@@ -136,7 +164,8 @@ async function collectMarketData(
   market: AsterMarket,
   startTime: number,
   endTime: number,
-  collectedAt: number
+  collectedAt: number,
+  openInterest: number | null
 ): Promise<number> {
   const response = await fetch(
     `${CONFIG.apiBaseUrl}/fundingRate?symbol=${market.symbol}&startTime=${startTime}&endTime=${endTime}&limit=1000`
@@ -155,10 +184,8 @@ async function collectMarketData(
   // Calculate interval from data
   const intervalHours = calculateIntervalHours(data);
 
-  // Process only the most recent record
-  const recentData = data.slice(-1);
-
-  const statements = recentData
+  // Process all records from the 48h window (INSERT OR REPLACE avoids duplicates)
+  const statements = data
     .map(item => {
       const rateRaw = parseFloat(item.fundingRate);
       const rates = calculateRates(rateRaw, intervalHours, EXCHANGE_NAME);
@@ -178,8 +205,8 @@ async function collectMarketData(
 
       return env.DB_WRITE.prepare(`
         INSERT OR REPLACE INTO aster_funding_v3 
-        (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source, open_interest)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         market.symbol,
         market.baseAsset,
@@ -190,7 +217,8 @@ async function collectMarketData(
         rates.rate1hPercent,
         rates.rateApr,
         collectedAt,
-        'api'
+        'api',
+        openInterest
       );
     })
     .filter(stmt => stmt !== null) as any[];
@@ -207,9 +235,11 @@ async function collectMarketData(
  */
 export async function importAsterV3(
   env: Env,
-  daysBack: number = 30
-): Promise<{ success: boolean; records: number; errors: number }> {
-  console.log(`[V3 Aster Import] Starting import for last ${daysBack} days`);
+  daysBack: number = 30,
+  offset: number = 0,
+  limit: number = 20
+): Promise<{ success: boolean; records: number; errors: number; markets: number; offset: number; limit: number; hasMore: boolean }> {
+  console.log(`[V3 Aster Import] Starting import for last ${daysBack} days (offset=${offset}, limit=${limit})`);
 
   const now = Date.now();
   const startTime = now - (daysBack * 86400 * 1000);
@@ -217,15 +247,15 @@ export async function importAsterV3(
 
   // Fetch all active markets dynamically
   const markets = await fetchActiveMarkets();
-  console.log(`[V3 Aster Import] Found ${markets.length} active markets`);
+  console.log(`[V3 Aster Import] Found ${markets.length} active markets, processing ${offset}-${offset + limit}`);
 
+  const batch = markets.slice(offset, offset + limit);
   let totalRecords = 0;
   let errorCount = 0;
 
-  // Process sequentially to avoid worker CPU limits
-  for (let i = 0; i < markets.length; i++) {
-    const market = markets[i];
-    console.log(`[V3 Aster Import] Processing ${i + 1}/${markets.length}: ${market.symbol}`);
+  for (let i = 0; i < batch.length; i++) {
+    const market = batch[i];
+    console.log(`[V3 Aster Import] Processing ${offset + i + 1}/${markets.length}: ${market.symbol}`);
     
     try {
       const records = await importMarketHistory(env, market, startTime, now, collectedAt);
@@ -235,19 +265,19 @@ export async function importAsterV3(
       errorCount++;
       console.error(`[V3 Aster Import] Error importing ${market.symbol}:`, error);
     }
-    
-    // Small delay every 10 markets to avoid rate limits
-    if ((i + 1) % 10 === 0 && i + 1 < markets.length) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
   }
 
-  console.log(`[V3 Aster Import] Completed: ${totalRecords} records, ${errorCount} errors`);
+  const hasMore = offset + limit < markets.length;
+  console.log(`[V3 Aster Import] Batch completed: ${totalRecords} records, ${errorCount} errors, hasMore=${hasMore}`);
   
   return {
     success: errorCount === 0,
     records: totalRecords,
-    errors: errorCount
+    errors: errorCount,
+    markets: markets.length,
+    offset,
+    limit,
+    hasMore
   };
 }
 

@@ -37,7 +37,8 @@ interface EdgeXFundingData {
   contractId: string;
   fundingRate: string;
   forecastFundingRate: string;
-  fundingTime: string;
+  fundingTime: string;          // Last settlement time in ms
+  fundingTimestamp: string;     // Current funding accumulation time in ms
 }
 
 interface EdgeXFundingResponse {
@@ -99,6 +100,27 @@ async function fetchContractFundingRate(contractId: string): Promise<EdgeXFundin
 }
 
 /**
+ * Fetch open interest for a single contract via getTicker
+ */
+async function fetchContractOI(contractId: string): Promise<number | null> {
+  try {
+    const response = await fetch(
+      `${CONFIG.apiBaseUrl}/quote/getTicker?contractId=${contractId}`,
+      { method: 'GET', headers: { 'Accept': 'application/json' } }
+    );
+    if (!response.ok) return null;
+    const data = await response.json() as { code: string; data: Array<{ openInterest?: string }> };
+    if (data.code === 'SUCCESS' && data.data && data.data.length > 0) {
+      const oi = data.data[0].openInterest ? parseFloat(data.data[0].openInterest) : null;
+      return oi && !isNaN(oi) ? oi : null;
+    }
+  } catch (e) {
+    // Silently fail for individual OI fetches
+  }
+  return null;
+}
+
+/**
  * Main collection function - called by hourly cron
  */
 export async function collectEdgeXV3(env: Env): Promise<void> {
@@ -115,20 +137,41 @@ export async function collectEdgeXV3(env: Env): Promise<void> {
       return;
     }
     
-    // Fetch funding rates for all contracts
+    // Fetch funding rates for all contracts in parallel batches
+    // OI is fetched separately afterwards for successful contracts only (to stay under subrequest limit)
+    const fundingDataMap = new Map<string, { contract: EdgeXContract; fundingData: any }>();
     const statements: any[] = [];
     let successCount = 0;
     let failCount = 0;
     
-    for (const contract of contracts) {
-      try {
-        const fundingData = await fetchContractFundingRate(contract.contractId);
-        
-        if (!fundingData) {
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < contracts.length; i += BATCH_SIZE) {
+      const batch = contracts.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(contract => fetchContractFundingRate(contract.contractId))
+      );
+      // Delay between batches to avoid 429 rate limit
+      if (i + BATCH_SIZE < contracts.length) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      
+      for (let j = 0; j < batch.length; j++) {
+        const contract = batch[j];
+        const result = results[j];
+        if (result.status === 'fulfilled' && result.value) {
+          fundingDataMap.set(contract.contractId, { contract, fundingData: result.value });
+        } else {
           failCount++;
-          continue;
         }
-        
+      }
+    }
+    
+    // OI fetch disabled for EdgeX - too many contracts (~292) would double subrequests
+    // TODO: Implement OI fetch on hourly cron or via bulk endpoint when available
+    const oiMap = new Map<string, number | null>();
+    
+    // Build INSERT statements
+    for (const [contractId, { contract, fundingData }] of fundingDataMap) {
         const symbol = contract.contractName;
         const baseAsset = symbol.replace('USD', '');
         
@@ -153,14 +196,18 @@ export async function collectEdgeXV3(env: Env): Promise<void> {
           console.warn(`[V3 EdgeX] Warning for ${symbol}: ${validation.message}`);
         }
         
-        // Use current timestamp as funding_time
-        const fundingTime = collectedAt;
+        // Use fundingTimestamp (when rate was recorded), fall back to collectedAt
+        const fundingTime = fundingData.fundingTimestamp
+          ? Math.floor(parseInt(fundingData.fundingTimestamp) / 1000)
+          : collectedAt;
         
+        const openInterest = oiMap.get(contractId) ?? null;
+
         statements.push(
           env.DB_WRITE.prepare(`
             INSERT OR REPLACE INTO edgex_funding_v3 
-            (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source, open_interest)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
             symbol,
             baseAsset,
@@ -171,16 +218,12 @@ export async function collectEdgeXV3(env: Env): Promise<void> {
             rates.rate1hPercent,
             rates.rateApr,
             collectedAt,
-            'api'
+            'api',
+            openInterest
           )
         );
         
         successCount++;
-        
-      } catch (error) {
-        console.error(`[V3 EdgeX] Error fetching contract ${contract.contractId}:`, error);
-        failCount++;
-      }
     }
     
     // Batch insert all records

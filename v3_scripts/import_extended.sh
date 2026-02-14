@@ -22,9 +22,12 @@ echo "Direct API: https://api.starknet.extended.exchange"
 echo "=================================================="
 echo ""
 
-# Calculate timestamps (Extended uses milliseconds)
-END_TS=$(date -u +%s)000
-START_TS=$((END_TS - DAYS_BACK * 86400 * 1000))
+# Calculate timestamps (in milliseconds for Extended API)
+END_TS=$(date +%s)
+START_TS=$((END_TS - (DAYS_BACK * 86400)))
+END_MS=$((END_TS * 1000))
+START_MS=$((START_TS * 1000))
+
 NOW_SEC=$(date -u +%s)
 
 # Fetch all active markets dynamically
@@ -53,7 +56,7 @@ while IFS=: read -r SYMBOL TOKEN; do
   echo "[${CURRENT}/${MARKET_COUNT}] ${TOKEN} (${SYMBOL})..."
   
   # Fetch funding history (direct API, no proxy)
-  API_URL="https://api.starknet.extended.exchange/api/v1/info/${SYMBOL}/funding?startTime=${START_TS}&endTime=${END_TS}"
+  API_URL="https://api.starknet.extended.exchange/api/v1/info/${SYMBOL}/funding?startTime=${START_MS}&endTime=${END_MS}"
   
   FUNDINGS=$(curl -s "$API_URL" \
     -H "User-Agent: Mozilla/5.0 (compatible; DefiAPI/1.0)" \
@@ -96,7 +99,8 @@ while IFS=: read -r SYMBOL TOKEN; do
     ($rate_raw * 100) as $rate_raw_percent |
     ($rate_raw_percent / ($interval | tonumber)) as $rate_1h_percent |
     ($rate_raw_percent * ($events | tonumber)) as $rate_apr |
-    "INSERT OR REPLACE INTO extended_funding_v3 (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source) VALUES ('\''\($symbol)'\'', '\''\($token)'\'', \(.T), \($rate_raw), \($rate_raw_percent), \($interval), \($rate_1h_percent), \($rate_apr), \($now), '\''import'\'');"
+    ((.T / 1000 | floor) - 3600) as $funding_time |
+    "INSERT OR REPLACE INTO extended_funding_v3 (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source) VALUES ('\''\($symbol)'\'', '\''\($token)'\'', \($funding_time), \($rate_raw), \($rate_raw_percent), \($interval), \($rate_1h_percent), \($rate_apr), \($now), '\''import'\'');"
   ' >> "$TEMP_SQL"
   
   # Execute batch insert

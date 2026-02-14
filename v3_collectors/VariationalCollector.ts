@@ -93,6 +93,15 @@ export async function collectVariationalV3(env: Env): Promise<void> {
       // Parse funding rate - API format: divide by 10, then by 100
       const fundingRateFromAPI = parseFloat(listing.funding_rate || '0');
       const rateRaw = fundingRateFromAPI / 10 / 100;
+
+      // Parse open interest (sum of long + short)
+      let openInterest: number | null = null;
+      if (listing.open_interest) {
+        const longOI = parseFloat(listing.open_interest.long_open_interest || '0');
+        const shortOI = parseFloat(listing.open_interest.short_open_interest || '0');
+        const totalOI = longOI + shortOI;
+        openInterest = !isNaN(totalOI) && totalOI > 0 ? totalOI : null;
+      }
       
       // Parse funding interval - convert seconds to hours
       const fundingIntervalSeconds = listing.funding_interval_s || 28800; // Default 8h
@@ -117,8 +126,8 @@ export async function collectVariationalV3(env: Env): Promise<void> {
       statements.push(
         env.DB_WRITE.prepare(`
           INSERT OR REPLACE INTO variational_funding_v3 
-          (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (symbol, base_asset, funding_time, rate_raw, rate_raw_percent, interval_hours, rate_1h_percent, rate_apr, collected_at, source, open_interest)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).bind(
           ticker,
           ticker, // base_asset = ticker for Variational
@@ -129,7 +138,8 @@ export async function collectVariationalV3(env: Env): Promise<void> {
           rates.rate1hPercent,
           rates.rateApr,
           collectedAt,
-          'api'
+          'api',
+          openInterest
         )
       );
     }

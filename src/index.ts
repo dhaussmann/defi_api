@@ -1,42 +1,60 @@
-import { LighterTracker } from './LighterTracker';
-import { ParadexTracker } from './ParadexTracker';
-import { HyperliquidTracker } from './HyperliquidTracker';
-import { EdgeXTracker } from './EdgeXTracker';
-import { AsterTracker } from './AsterTracker';
-import { PacificaTracker } from './PacificaTracker';
-import { ExtendedTracker } from './ExtendedTracker';
-import { HyENATracker } from './HyENATracker';
-import { XYZTracker } from './XYZTracker';
-import { FLXTracker } from './FLXTracker';
-import { VNTLTracker } from './VNTLTracker';
-import { KMTracker } from './KMTracker';
-import { VariationalTracker } from './VariationalTracker';
+// Old Durable Object trackers moved to Archive/old_trackers/
 import { Env, ApiResponse, MarketStatsQuery, MarketStatsRecord } from './types';
 import { calculateAllVolatilityMetrics } from './volatility';
 import { calculateAndCacheFundingMAs, getCachedFundingMAs } from './maCache';
-import { calculateAndCacheArbitrage } from './arbitrageCache';
-import { getArbitrageOpportunities } from './arbitrageHandler';
 import { fetchAndSaveVariationalData } from './variationalFetcher';
 import { exportAllTrackerData, exportTrackerDataForExchange } from '../v3_collectors/TrackerDataExporter';
-import { handleFundingRates, handleFundingAPR, handleFundingSummary } from './v3Api';
-import { syncAllV3ToUnified, getUnifiedFundingStats, queryUnifiedFundingRates } from './unifiedFundingSync';
-import { calculateFundingMA, queryFundingMA, getLatestMA } from './fundingMA';
+import { handleFundingRates, handleFundingAPR, handleFundingSummary, handleSymbols } from './v3Api';
+import { handleBulkFundingRates, handleBulkFundingMA, handleLatestFundingRates } from './v3Api_bulk';
+import { syncAllV3ToUnified, syncImportsToUnified, syncExchangeToUnified, getUnifiedFundingStats, queryUnifiedFundingRates } from './unifiedFundingSync';
+import { calculateFundingMA, calculateSingleDailyMA, calculateAllDailyMAs, queryFundingMA, getLatestMA, getLatestMAAll } from './fundingMA';
+import { calculateArbitrageV3, queryArbitrageV3 } from './arbitrageV3';
+import { withCache, warmupCache } from './kvCache';
+import { collectExtendedV3 } from '../v3_collectors/ExtendedCollector';
+import { collectHyperliquidV3 } from '../v3_collectors/HyperliquidCollector';
+import { collectParadexV3 } from '../v3_collectors/ParadexCollector';
+import { collectEdgeXV3 } from '../v3_collectors/EdgeXCollector';
+import { collectLighterV3 } from '../v3_collectors/LighterCollector';
+import { collectAsterV3, importAsterV3 } from '../v3_collectors/AsterCollector';
+import { collectNadoV3 } from '../v3_collectors/NadoCollector';
+import { collectFelixV3 } from '../v3_collectors/FelixCollector';
+import { collectHyENAV3 } from '../v3_collectors/HyENACollector';
+import { collectXYZV3 } from '../v3_collectors/XYZCollector';
+import { collectVentualsV3 } from '../v3_collectors/VentualsCollector';
+import { collectVariationalV3 } from '../v3_collectors/VariationalCollector';
+import { collectEtherealV3 } from '../v3_collectors/EtherealCollector';
 
-export { LighterTracker, ParadexTracker, HyperliquidTracker, EdgeXTracker, AsterTracker, PacificaTracker, ExtendedTracker, HyENATracker, XYZTracker, FLXTracker, VNTLTracker, KMTracker, VariationalTracker };
+// Old tracker exports removed - using V3 collectors instead
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     const cronType = event.cron || '*/5 * * * *'; // Default to 5-minute cron
     console.log(`[Cron] Scheduled event triggered: ${cronType} at ${new Date().toISOString()}`);
 
-    // Every 5 minutes: Health check + normalized_tokens update + 1-minute aggregation + MA cache + sync aggregations
+    // Every 5 minutes: V3 collectors + tokens update + aggregation + V3 sync
+    // IMPORTANT: Keep this cron lightweight (<1000 subrequests) - no MA/Arbitrage here
     if (cronType === '*/5 * * * *') {
       try {
+        console.log('[Cron] Collecting V3 data from all exchanges');
+        await Promise.allSettled([
+          collectExtendedV3(env),
+          collectHyperliquidV3(env),
+          collectParadexV3(env),
+          collectEdgeXV3(env),
+          collectLighterV3(env),
+          collectAsterV3(env),
+          collectNadoV3(env),
+          collectFelixV3(env),
+          collectHyENAV3(env),
+          collectXYZV3(env),
+          collectVentualsV3(env),
+          collectVariationalV3(env),
+          collectEtherealV3(env)
+        ]);
+        console.log('[Cron] V3 data collection completed');
+
         console.log('[Cron] Fetching Variational data');
         await fetchAndSaveVariationalData(env);
-
-        console.log('[Cron] Running WebSocket health check');
-        await checkTrackerHealth(env);
 
         console.log('[Cron] Updating normalized_tokens table');
         await updateNormalizedTokens(env);
@@ -50,11 +68,9 @@ export default {
         console.log('[Cron] Syncing market_history to DB_READ');
         await syncMarketHistoryToRead(env);
 
-        console.log('[Cron] Calculating and caching moving averages');
-        await calculateAndCacheFundingMAs(env);
-
-        console.log('[Cron] Calculating and caching arbitrage opportunities');
-        await calculateAndCacheArbitrage(env);
+        // Sync V3 data to unified table every 5 min for fresh data
+        console.log('[Cron] Syncing V3 data to unified_v3');
+        await syncAllV3ToUnified(env);
 
         console.log('[Cron] 5-minute tasks completed successfully');
       } catch (error) {
@@ -62,18 +78,48 @@ export default {
       }
     }
 
-    // Every hour at :10: Calculate moving averages
+    // Every hour at :05: Heavy tasks - MA cache, Arbitrage, KV warmup
+    // Separated from 5-min cron to stay under 1000 subrequest limit
+    if (cronType === '5 * * * *') {
+      try {
+        console.log('[Cron] Calculating and caching moving averages');
+        await calculateAndCacheFundingMAs(env);
+
+        // Calculate each daily MA period separately with individual error handling
+        for (const period of ['3d', '7d', '14d', '30d']) {
+          try {
+            console.log(`[Cron] Calculating ${period} MA from 24h snapshots`);
+            const r = await calculateSingleDailyMA(env, period);
+            console.log(`[Cron] ${period} MA result:`, r.message);
+          } catch (e) {
+            console.error(`[Cron] Error in ${period} MA:`, e);
+          }
+        }
+
+        console.log('[Cron] Calculating V3 arbitrage opportunities');
+        await calculateArbitrageV3(env);
+
+        console.log('[Cron] Warming up KV cache for expensive endpoints');
+        await warmupCache(env, 'https://api.fundingrate.de');
+
+        console.log('[Cron] Hourly heavy tasks completed successfully');
+      } catch (error) {
+        console.error('[Cron] Error in hourly heavy tasks:', error);
+      }
+    }
+
+    // Every hour at :10: Calculate moving averages (detailed per-exchange)
     if (cronType === '10 * * * *') {
       try {
-        console.log('[Cron] Starting moving average calculation');
+        console.log('[Cron] Starting moving average calculation (24h from raw data)');
         const maResult = await calculateFundingMA(env);
-        console.log('[Cron] Moving average calculation completed:', maResult);
+        console.log('[Cron] 24h MA calculation completed:', maResult);
       } catch (error) {
         console.error('[Cron] Error in MA calculation:', error);
       }
     }
 
-    // Every hour: Aggregate 1m data to hourly and clean up
+    // Every hour at :00: Hourly aggregation and cleanup
     if (cronType === '0 * * * *') {
       try {
         console.log('[Cron] Running 1m → 1h aggregation and cleanup');
@@ -107,13 +153,13 @@ export default {
     }
 
     try {
-      // V3 API endpoints - handle BEFORE other routes
+      // V3 API endpoints - handle BEFORE other routes (with KV cache)
       if (path === '/api/v3/funding/rates') {
-        return await handleFundingRates(env, url.searchParams);
+        return await withCache(env, path, url.searchParams, () => handleFundingRates(env, url.searchParams));
       } else if (path === '/api/v3/funding/apr') {
-        return await handleFundingAPR(env, url.searchParams);
+        return await withCache(env, path, url.searchParams, () => handleFundingAPR(env, url.searchParams));
       } else if (path === '/api/v3/funding/summary') {
-        return await handleFundingSummary(env, url.searchParams);
+        return await withCache(env, path, url.searchParams, () => handleFundingSummary(env, url.searchParams));
       } else if (path === '/api/v3/funding/ma') {
         const symbol = url.searchParams.get('symbol');
         const period = url.searchParams.get('period');
@@ -130,8 +176,17 @@ export default {
           return Response.json({ success: false, error: 'Invalid period. Use: 1h, 24h, 3d, 7d, 14d, 30d' }, { status: 400, headers: corsHeaders });
         }
 
-        const result = await queryFundingMA(env, symbol, period, exchange, limit);
-        return Response.json(result, { headers: corsHeaders });
+        return await withCache(env, path, url.searchParams, async () => {
+          const result = await queryFundingMA(env, symbol, period, exchange, limit);
+          return Response.json(result, { headers: corsHeaders });
+        });
+      } else if (path === '/api/v3/funding/ma/latest/all') {
+        const exchange = url.searchParams.get('exchange') || 'all';
+
+        return await withCache(env, path, url.searchParams, async () => {
+          const result = await getLatestMAAll(env, exchange);
+          return Response.json(result, { headers: corsHeaders });
+        });
       } else if (path === '/api/v3/funding/ma/latest') {
         const symbol = url.searchParams.get('symbol');
         const exchange = url.searchParams.get('exchange') || 'all';
@@ -140,8 +195,16 @@ export default {
           return Response.json({ success: false, error: 'Symbol parameter is required' }, { status: 400, headers: corsHeaders });
         }
 
-        const result = await getLatestMA(env, symbol, exchange);
-        return Response.json(result, { headers: corsHeaders });
+        return await withCache(env, path, url.searchParams, async () => {
+          const result = await getLatestMA(env, symbol, exchange);
+          return Response.json(result, { headers: corsHeaders });
+        });
+      } else if (path === '/api/v3/funding/rates/latest') {
+        return await withCache(env, path, url.searchParams, () => handleLatestFundingRates(env, url.searchParams));
+      } else if (path === '/api/v3/funding/rates/bulk') {
+        return await withCache(env, path, url.searchParams, () => handleBulkFundingRates(env, url.searchParams));
+      } else if (path === '/api/v3/funding/ma/bulk') {
+        return await withCache(env, path, url.searchParams, () => handleBulkFundingMA(env, url.searchParams));
       }
 
       // Trackers auto-start themselves via their fetch() methods
@@ -150,8 +213,78 @@ export default {
       // Route requests
       if (path.startsWith('/tracker/')) {
         return await handleTrackerRoute(request, env, path, corsHeaders);
-      } else if (path.startsWith('/api/')) {
-        return await handleApiRoute(request, env, path, corsHeaders);
+      } else if (path === '/debug/sync-v3') {
+        console.log('[Debug] Manually triggering V3 sync');
+        await syncAllV3ToUnified(env);
+        return Response.json({ success: true, message: 'V3 sync triggered' }, { headers: corsHeaders });
+      } else if (path === '/debug/backfill') {
+        // Backfill a single exchange: /debug/backfill?exchange=hyperliquid&days=7
+        const url = new URL(request.url);
+        const exchange = url.searchParams.get('exchange');
+        const days = parseInt(url.searchParams.get('days') || '7');
+        if (!exchange) {
+          return Response.json({ success: false, error: 'exchange parameter required' }, { status: 400, headers: corsHeaders });
+        }
+        const nowSec = Math.floor(Date.now() / 1000);
+        const startFrom = nowSec - (days * 86400);
+        console.log(`[Backfill] Syncing ${exchange} from ${days} days ago`);
+        let totalSynced = 0;
+        let currentStart = startFrom;
+        // Run up to 5 iterations, advancing startFrom each time
+        for (let i = 0; i < 5; i++) {
+          const count = await syncExchangeToUnified(env, exchange, currentStart);
+          totalSynced += count;
+          if (count === 0) break;
+          // Get the latest collected_at for this exchange to advance the cursor
+          const latest = await env.DB_UNIFIED.prepare(
+            `SELECT MAX(collected_at) as last_collected FROM unified_v3 WHERE exchange = ?`
+          ).bind(exchange).first<{ last_collected: number }>();
+          if (latest?.last_collected) {
+            currentStart = latest.last_collected;
+          }
+        }
+        return Response.json({ success: true, exchange, days, totalSynced }, { headers: corsHeaders });
+      } else if (path === '/debug/import-aster') {
+        const url = new URL(request.url);
+        const days = parseInt(url.searchParams.get('days') || '60');
+        const offset = parseInt(url.searchParams.get('offset') || '0');
+        const limit = parseInt(url.searchParams.get('limit') || '20');
+        console.log(`[Debug] Importing Aster historical data for ${days} days (offset=${offset}, limit=${limit})`);
+        const result = await importAsterV3(env, days, offset, limit);
+        return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/debug/sync-imports') {
+        console.log('[Debug] Manually triggering import sync');
+        const url = new URL(request.url);
+        const exchangesParam = url.searchParams.get('exchanges');
+        const daysParam = url.searchParams.get('days');
+        
+        const exchanges = exchangesParam ? exchangesParam.split(',') : undefined;
+        const days = daysParam ? parseInt(daysParam) : 30;
+        
+        const result = await syncImportsToUnified(env, exchanges, days);
+        return Response.json({ 
+          success: true, 
+          message: 'Import sync completed',
+          ...result
+        }, { headers: corsHeaders });
+      } else if (path === '/debug/collect-edgex') {
+        console.log('[Debug] Manually triggering EdgeX collection');
+        try {
+          await collectEdgeXV3(env);
+          const latest = await env.DB_WRITE.prepare("SELECT datetime(MAX(funding_time), 'unixepoch') as latest_funding, datetime(MAX(collected_at), 'unixepoch') as latest_collected, COUNT(*) as total FROM edgex_funding_v3 WHERE collected_at > (strftime('%s','now') - 300)").first();
+          return Response.json({ success: true, message: 'EdgeX collection completed', recent: latest }, { headers: corsHeaders });
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers: corsHeaders });
+        }
+      } else if (path === '/debug/collect-ethereal') {
+        console.log('[Debug] Manually triggering Ethereal collection');
+        try {
+          await collectEtherealV3(env);
+          const latest = await env.DB_WRITE.prepare("SELECT datetime(MAX(funding_time), 'unixepoch') as latest_funding, datetime(MAX(collected_at), 'unixepoch') as latest_collected, COUNT(*) as total FROM ethereal_funding_v3 WHERE collected_at > (strftime('%s','now') - 300)").first();
+          return Response.json({ success: true, message: 'Ethereal collection completed', recent: latest }, { headers: corsHeaders });
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers: corsHeaders });
+        }
       } else if (path === '/debug/update-normalized-tokens') {
         // Debug endpoint to manually trigger normalized_tokens update
         console.log('[Debug] Manually triggering normalized_tokens update');
@@ -169,9 +302,79 @@ export default {
         return Response.json({ success: true, message: 'Hourly aggregation triggered' }, { headers: corsHeaders });
       } else if (path === '/debug/calculate-ma') {
         // Debug endpoint to manually trigger MA calculation
-        console.log('[Debug] Manually triggering MA calculation');
-        const result = await calculateFundingMA(env);
+        // Supports optional exchange parameter for parallel processing
+        const url = new URL(request.url);
+        const exchange = url.searchParams.get('exchange');
+        const filterMsg = exchange ? ` for exchange: ${exchange}` : '';
+        console.log(`[Debug] Manually triggering MA calculation${filterMsg}`);
+        const result = await calculateFundingMA(env, ['24h'], exchange || undefined);
         return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/debug/calculate-ma-24h') {
+        console.log('[Debug] Manually triggering 24h MA calculation');
+        const result = await calculateFundingMA(env, ['24h']);
+        return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/debug/calculate-ma-3d') {
+        console.log('[Debug] Manually triggering 3d MA calculation');
+        const result = await calculateSingleDailyMA(env, '3d');
+        return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/debug/calculate-ma-7d') {
+        console.log('[Debug] Manually triggering 7d MA calculation');
+        const result = await calculateSingleDailyMA(env, '7d');
+        return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/debug/calculate-ma-14d') {
+        console.log('[Debug] Manually triggering 14d MA calculation');
+        const result = await calculateSingleDailyMA(env, '14d');
+        return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/debug/calculate-ma-30d') {
+        console.log('[Debug] Manually triggering 30d MA calculation');
+        const result = await calculateSingleDailyMA(env, '30d');
+        return Response.json(result, { headers: corsHeaders });
+      } else if (path === '/debug/calculate-arbitrage') {
+        console.log('[Debug] Manually triggering V3 arbitrage calculation');
+        // First check MA data availability
+        const maCheck = await env.DB_UNIFIED.prepare(`
+          SELECT period, COUNT(*) as cnt, COUNT(DISTINCT exchange) as exchanges, COUNT(DISTINCT normalized_symbol) as symbols
+          FROM funding_ma
+          WHERE ma_rate_1h IS NOT NULL AND ma_apr IS NOT NULL
+          GROUP BY period
+        `).all();
+        const arbCount = await env.DB_UNIFIED.prepare(`SELECT COUNT(*) as cnt FROM arbitrage_v3`).first();
+        await calculateArbitrageV3(env);
+        const arbCountAfter = await env.DB_UNIFIED.prepare(`SELECT COUNT(*) as cnt FROM arbitrage_v3`).first();
+        return Response.json({ 
+          success: true, 
+          message: 'V3 Arbitrage calculation triggered',
+          ma_data: maCheck.results,
+          arb_before: arbCount,
+          arb_after: arbCountAfter
+        }, { headers: corsHeaders });
+      } else if (path === '/debug/unified-coverage') {
+        const now = Math.floor(Date.now() / 1000);
+        const coverage = await env.DB_UNIFIED.prepare(`
+          SELECT 
+            exchange,
+            COUNT(*) as total_rows,
+            COUNT(DISTINCT normalized_symbol) as symbols,
+            MIN(funding_time) as min_ft,
+            MAX(funding_time) as max_ft,
+            MIN(CASE WHEN funding_time <= 10000000000 THEN funding_time ELSE funding_time/1000 END) as min_ft_sec,
+            MAX(CASE WHEN funding_time <= 10000000000 THEN funding_time ELSE funding_time/1000 END) as max_ft_sec
+          FROM unified_v3
+          WHERE rate_1h_percent IS NOT NULL
+          GROUP BY exchange
+          ORDER BY exchange
+        `).all();
+        const rows = (coverage.results || []).map((r: any) => ({
+          exchange: r.exchange,
+          total_rows: r.total_rows,
+          symbols: r.symbols,
+          min_ft_sec: r.min_ft_sec,
+          max_ft_sec: r.max_ft_sec,
+          min_date: new Date(r.min_ft_sec * 1000).toISOString(),
+          max_date: new Date(r.max_ft_sec * 1000).toISOString(),
+          span_days: ((r.max_ft_sec - r.min_ft_sec) / 86400).toFixed(1),
+        }));
+        return Response.json({ success: true, now, exchanges: rows }, { headers: corsHeaders });
       } else if (path === '/debug/check-db-write') {
         const now = Math.floor(Date.now() / 1000);
         const result = await env.DB_WRITE.prepare('SELECT COUNT(*) as count, MAX(created_at) as latest FROM market_stats').first();
@@ -199,8 +402,87 @@ export default {
           query_result: { count: result.results?.length || 0, sample: result.results },
           time_window: { now, tenMinutesAgo }
         }, { headers: corsHeaders });
+      } else if (path === '/api/v3/exchanges') {
+        // V3: List all available exchanges
+        const exchanges = await env.DB_UNIFIED.prepare(`
+          SELECT DISTINCT exchange 
+          FROM unified_v3 
+          WHERE rate_1h_percent IS NOT NULL 
+          ORDER BY exchange
+        `).all();
+        
+        return Response.json({
+          success: true,
+          count: exchanges.results?.length || 0,
+          exchanges: exchanges.results?.map((r: any) => r.exchange) || []
+        }, { headers: corsHeaders });
+      } else if (path === '/api/v3/symbols') {
+        return await withCache(env, path, url.searchParams, () => handleSymbols(env, url.searchParams));
+      } else if (path === '/api/v3/arbitrage') {
+        // V3: Arbitrage opportunities
+        const url = new URL(request.url);
+        const symbolParam = url.searchParams.get('symbol');
+        const exchangeParam = url.searchParams.get('exchange') || url.searchParams.get('exchanges');
+        const periodParam = url.searchParams.get('period');
+        const minSpreadAPR = url.searchParams.get('minSpreadAPR');
+        const onlyStable = url.searchParams.get('stable') === 'true';
+        const limit = url.searchParams.get('limit');
+        
+        const options: any = {};
+        
+        if (symbolParam) {
+          options.symbols = [symbolParam.toUpperCase()];
+        }
+        
+        if (exchangeParam) {
+          options.exchanges = exchangeParam.split(',').map((e: string) => e.trim().toLowerCase());
+        }
+        
+        if (periodParam) {
+          options.periods = [periodParam];
+        }
+        
+        if (minSpreadAPR) {
+          options.minSpreadAPR = parseFloat(minSpreadAPR);
+        }
+        
+        if (onlyStable) {
+          options.onlyStable = true;
+        }
+        
+        if (limit) {
+          options.limit = parseInt(limit);
+        } else {
+          options.limit = 100;
+        }
+        
+        return await withCache(env, path, url.searchParams, async () => {
+          const result = await queryArbitrageV3(env, options);
+          return Response.json({
+            success: true,
+            count: result.length,
+            opportunities: result
+          }, { headers: corsHeaders });
+        });
       } else if (path === '/' || path === '') {
-        return handleRoot(corsHeaders);
+        return Response.json({
+          name: 'DeFi Funding Rate API',
+          version: '3.0',
+          endpoints: {
+            v3: {
+              exchanges: '/api/v3/exchanges',
+              symbols: '/api/v3/symbols',
+              funding_rates: '/api/v3/funding/rates?symbol=BTC&exchange=hyperliquid',
+              funding_apr: '/api/v3/funding/apr?symbol=BTC&exchange=hyperliquid',
+              funding_summary: '/api/v3/funding/summary?symbol=BTC',
+              funding_ma: '/api/v3/funding/ma?symbol=BTC&exchange=extended&period=24h',
+              funding_ma_latest: '/api/v3/funding/ma/latest?symbol=BTC',
+              arbitrage: '/api/v3/arbitrage?symbol=BTC&period=24h',
+              bulk_rates: '/api/v3/funding/rates/bulk',
+              bulk_ma: '/api/v3/funding/ma/bulk'
+            }
+          }
+        }, { headers: corsHeaders });
       } else {
         return new Response('Not found', { status: 404, headers: corsHeaders });
       }
@@ -324,494 +606,6 @@ async function handleTrackerRoute(
   });
 }
 
-// Handle API data routes
-async function handleApiRoute(
-  request: Request,
-  env: Env,
-  path: string,
-  corsHeaders: Record<string, string>
-): Promise<Response> {
-  const url = new URL(request.url);
-
-  switch (path) {
-    case '/api/stats':
-      return await getMarketStats(env, url, corsHeaders);
-    case '/api/latest':
-      return await getLatestStats(env, url, corsHeaders);
-    case '/api/status':
-      return await getTrackerStatus(env, corsHeaders);
-    case '/api/trackers':
-      return await getAllTrackersStatus(env, corsHeaders);
-    case '/api/compare':
-      return await compareTokenAcrossExchanges(env, url, corsHeaders);
-    case '/api/tokens':
-      return await getAvailableTokens(env, corsHeaders);
-    case '/api/markets':
-      return await getAllMarkets(env, url, corsHeaders);
-    case '/api/funding-history':
-      return await getFundingRateHistory(env, url, corsHeaders);
-    case '/api/market-history':
-      return await getMarketHistory(env, url, corsHeaders);
-    case '/api/volatility':
-      return await getVolatility(env, url, corsHeaders);
-    case '/api/funding/arbitrage':
-      return await getArbitrageOpportunities(env, url, corsHeaders);
-    case '/api/admin/cache-ma':
-      // Temporary endpoint to manually trigger MA cache calculation
-      // Query param: all=true to calculate all timeframes at once
-      try {
-        const calculateAll = url.searchParams.get('all') === 'true';
-        if (calculateAll) {
-          // Calculate all timeframes sequentially
-          const { calculateAllTimeframes } = await import('./maCache');
-          await calculateAllTimeframes(env);
-          return Response.json({ success: true, message: 'All timeframes calculated' }, { headers: corsHeaders });
-        } else {
-          await calculateAndCacheFundingMAs(env);
-          return Response.json({ success: true, message: 'MA cache calculation triggered' }, { headers: corsHeaders });
-        }
-      } catch (error) {
-        return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
-      }
-    case '/api/admin/cache-arbitrage':
-      // Manual trigger for arbitrage calculation
-      try {
-        await calculateAndCacheArbitrage(env);
-        return Response.json({ success: true, message: 'Arbitrage cache calculation triggered' }, { headers: corsHeaders });
-      } catch (error) {
-        return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
-      }
-    case '/api/admin/fetch-variational':
-      // Manual trigger for Variational data fetching
-      try {
-        await fetchAndSaveVariationalData(env);
-        return Response.json({ success: true, message: 'Variational data fetched and saved' }, { headers: corsHeaders });
-      } catch (error) {
-        return Response.json({ success: false, error: error instanceof Error ? error.message : 'Failed' }, { status: 500, headers: corsHeaders });
-      }
-    case '/api/admin/check-old-db':
-      // Check data availability in old defiapi-db for Jan 9-29, 2026
-      try {
-        const startTs = 1736726400; // Jan 9, 2026
-        const endTs = 1738195200; // Jan 29, 2026
-        
-        const results: any = { 
-          period: { start: startTs, end: endTs, start_date: '2026-01-09', end_date: '2026-01-29' }
-        };
-        
-        // Check market_history
-        const historyCount = await env.DB.prepare(`
-          SELECT COUNT(*) as count FROM market_history 
-          WHERE hour_timestamp >= ? AND hour_timestamp <= ?
-        `).bind(startTs, endTs).first();
-        results.market_history = historyCount?.count || 0;
-        
-        // Check market_stats_1m
-        const stats1mCount = await env.DB.prepare(`
-          SELECT COUNT(*) as count FROM market_stats_1m 
-          WHERE minute_timestamp >= ? AND minute_timestamp <= ?
-        `).bind(startTs, endTs).first();
-        results.market_stats_1m = stats1mCount?.count || 0;
-        
-        // Check funding_rate_history (uses collected_at in MILLISECONDS!)
-        const startMs = startTs * 1000;
-        const endMs = endTs * 1000;
-        
-        // Get min/max timestamps to understand the data range
-        const timestampRange = await env.DB.prepare(`
-          SELECT 
-            MIN(collected_at) as min_ts,
-            MAX(collected_at) as max_ts,
-            COUNT(*) as total
-          FROM funding_rate_history
-        `).first();
-        results.funding_timestamp_range = {
-          min: timestampRange?.min_ts,
-          max: timestampRange?.max_ts,
-          min_date: timestampRange?.min_ts ? new Date(timestampRange.min_ts).toISOString() : null,
-          max_date: timestampRange?.max_ts ? new Date(timestampRange.max_ts).toISOString() : null,
-          total: timestampRange?.total || 0
-        };
-        
-        const fundingCount = await env.DB.prepare(`
-          SELECT COUNT(*) as count FROM funding_rate_history
-          WHERE collected_at >= ? AND collected_at <= ?
-        `).bind(startMs, endMs).first();
-        results.funding_rate_history = fundingCount?.count || 0;
-        
-        // Get BTC/Hyperliquid count
-        const btcHyperliquidCount = await env.DB.prepare(`
-          SELECT COUNT(*) as count FROM funding_rate_history
-          WHERE symbol = 'BTC' AND exchange = 'hyperliquid'
-            AND collected_at >= ? AND collected_at <= ?
-        `).bind(startMs, endMs).first();
-        results.btc_hyperliquid_funding = btcHyperliquidCount?.count || 0;
-        
-        // Get date breakdown for BTC/Hyperliquid in the requested range
-        const btcDates = await env.DB.prepare(`
-          SELECT DATE(collected_at / 1000, 'unixepoch') as date, COUNT(*) as count
-          FROM funding_rate_history
-          WHERE symbol = 'BTC' AND exchange = 'hyperliquid'
-            AND collected_at >= ? AND collected_at <= ?
-          GROUP BY date
-          ORDER BY date
-        `).bind(startMs, endMs).all();
-        results.btc_hyperliquid_by_date = btcDates.results || [];
-        
-        // Get ALL BTC/Hyperliquid dates to see what's actually in the DB
-        const allBtcDates = await env.DB.prepare(`
-          SELECT 
-            DATE(collected_at / 1000, 'unixepoch') as date, 
-            COUNT(*) as count,
-            MIN(collected_at) as min_ts,
-            MAX(collected_at) as max_ts
-          FROM funding_rate_history
-          WHERE symbol = 'BTC' AND exchange = 'hyperliquid'
-          GROUP BY date
-          ORDER BY date DESC
-          LIMIT 30
-        `).all();
-        results.all_btc_dates_sample = allBtcDates.results || [];
-        
-        // Get exchange breakdown from funding_rate_history
-        const fundingExchanges = await env.DB.prepare(`
-          SELECT exchange, COUNT(*) as count
-          FROM funding_rate_history
-          WHERE collected_at >= ? AND collected_at <= ?
-          GROUP BY exchange
-          ORDER BY count DESC
-        `).bind(startMs, endMs).all();
-        results.funding_exchanges = fundingExchanges.results || [];
-        
-        // Get exchange breakdown
-        const exchangeBreakdown = await env.DB.prepare(`
-          SELECT exchange, COUNT(*) as count 
-          FROM market_history 
-          WHERE hour_timestamp >= ? AND hour_timestamp <= ?
-          GROUP BY exchange
-          ORDER BY count DESC
-        `).bind(startTs, endTs).all();
-        results.exchanges = exchangeBreakdown.results || [];
-        
-        return Response.json({ 
-          success: true,
-          ...results
-        }, { headers: corsHeaders });
-        
-      } catch (error) {
-        console.error('[Check Old DB] Error:', error);
-        return Response.json({ 
-          success: false, 
-          error: error instanceof Error ? error.message : 'Check failed' 
-        }, { status: 500, headers: corsHeaders });
-      }
-    case '/api/admin/sync-db':
-      // Sync recent data from DB_WRITE to DB_READ
-      try {
-        const startTs = parseInt(url.searchParams.get('start') || '1769640000');
-        const limit = parseInt(url.searchParams.get('limit') || '1000');
-        
-        console.log(`[Sync] Copying data from DB_WRITE to DB_READ (start: ${startTs}, limit: ${limit})`);
-        
-        // Read from DB_WRITE (select specific columns to match DB_READ schema)
-        const sourceData = await env.DB_WRITE.prepare(`
-          SELECT 
-            exchange, symbol, normalized_symbol, hour_timestamp,
-            min_price, max_price, avg_mark_price, avg_index_price,
-            price_volatility, volume_base, volume_quote,
-            avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
-            avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
-            sample_count, aggregated_at
-          FROM market_history 
-          WHERE hour_timestamp >= ?
-          ORDER BY hour_timestamp, exchange, symbol
-          LIMIT ?
-        `).bind(startTs, limit).all();
-        
-        if (!sourceData.success || !sourceData.results || sourceData.results.length === 0) {
-          return Response.json({ 
-            success: true, 
-            message: 'No data to sync',
-            synced: 0 
-          }, { headers: corsHeaders });
-        }
-        
-        // Prepare batch insert for DB_READ
-        const records = sourceData.results;
-        let synced = 0;
-        
-        // Insert in smaller batches to avoid timeouts
-        const batchSize = 100;
-        for (let i = 0; i < records.length; i += batchSize) {
-          const batch = records.slice(i, i + batchSize);
-          
-          for (const record of batch) {
-            await env.DB_READ.prepare(`
-              INSERT OR REPLACE INTO market_history (
-                exchange, symbol, normalized_symbol, hour_timestamp,
-                min_price, max_price, avg_mark_price, avg_index_price,
-                price_volatility, volume_base, volume_quote, 
-                avg_open_interest, avg_open_interest_usd, max_open_interest_usd,
-                avg_funding_rate, avg_funding_rate_annual, min_funding_rate, max_funding_rate,
-                sample_count, aggregated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).bind(
-              record.exchange, 
-              record.symbol,
-              record.normalized_symbol ?? record.symbol,
-              record.hour_timestamp,
-              record.min_price ?? null,
-              record.max_price ?? null,
-              record.avg_mark_price ?? null,
-              record.avg_index_price ?? null,
-              record.price_volatility ?? 0,
-              record.volume_base ?? null,
-              record.volume_quote ?? null,
-              record.avg_open_interest ?? null,
-              record.avg_open_interest_usd ?? null,
-              record.max_open_interest_usd ?? null,
-              record.avg_funding_rate ?? null,
-              record.avg_funding_rate_annual ?? null,
-              record.min_funding_rate ?? null,
-              record.max_funding_rate ?? null,
-              record.sample_count ?? null,
-              record.aggregated_at ?? Math.floor(Date.now() / 1000)
-            ).run();
-            synced++;
-          }
-        }
-        
-        console.log(`[Sync] Successfully synced ${synced} records`);
-        
-        return Response.json({ 
-          success: true, 
-          message: `Synced ${synced} records from DB_WRITE to DB_READ`,
-          synced: synced,
-          nextStart: records[records.length - 1].hour_timestamp
-        }, { headers: corsHeaders });
-        
-      } catch (error) {
-        console.error('[Sync] Error:', error);
-        return Response.json({ 
-          success: false, 
-          error: error instanceof Error ? error.message : 'Sync failed' 
-        }, { status: 500, headers: corsHeaders });
-      }
-    case '/api/data/24h':
-      return await getData24h(env, url, corsHeaders);
-    case '/api/data/7d':
-      return await getData7d(env, url, corsHeaders);
-    case '/api/data/30d':
-      return await getData30d(env, url, corsHeaders);
-    case '/api/admin/aggregate-1m':
-      // Manual 1-minute aggregation trigger (temporary for testing)
-      try {
-        await aggregateTo1Minute(env);
-        return Response.json(
-          { success: true, message: '15s → 1m aggregation completed' },
-          { headers: corsHeaders }
-        );
-      } catch (error) {
-        return Response.json(
-          { success: false, error: error instanceof Error ? error.message : 'Aggregation failed' },
-          { status: 500, headers: corsHeaders }
-        );
-      }
-    case '/api/admin/aggregate-1h':
-      // Manual 1-hour aggregation trigger (temporary for testing)
-      try {
-        await aggregateTo1Hour(env);
-        return Response.json(
-          { success: true, message: '1m → 1h aggregation completed' },
-          { headers: corsHeaders }
-        );
-      } catch (error) {
-        return Response.json(
-          { success: false, error: error instanceof Error ? error.message : 'Aggregation failed' },
-          { status: 500, headers: corsHeaders }
-        );
-      }
-    case '/api/admin/import-market-history':
-      // One-time import of historical market_history from DB_READ to DB_WRITE
-      try {
-        const importResult = await importHistoricalMarketHistory(env);
-        return Response.json(
-          { 
-            success: true, 
-            message: 'Historical data import completed',
-            recordsImported: importResult.recordsImported,
-            durationMs: importResult.durationMs
-          },
-          { headers: corsHeaders }
-        );
-      } catch (error) {
-        return Response.json(
-          { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-          { status: 500, headers: corsHeaders }
-        );
-      }
-
-    case '/api/admin/fix-variational-intervals':
-      // Fix old Variational data with missing funding_interval_hours
-      try {
-        const fixResult = await fixVariationalFundingIntervals(env);
-        return Response.json(
-          { 
-            success: true, 
-            message: 'Variational funding intervals fixed',
-            recordsUpdated: fixResult.recordsUpdated,
-            durationMs: fixResult.durationMs
-          },
-          { headers: corsHeaders }
-        );
-      } catch (error) {
-        return Response.json(
-          { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-          { status: 500, headers: corsHeaders }
-        );
-      }
-    case '/api/admin/calculate-volatility':
-      // Manual volatility calculation trigger
-      try {
-        console.log('[API] Starting volatility calculation');
-        await calculateAllVolatilityMetrics(env);
-        console.log('[API] Volatility calculation completed');
-        return Response.json(
-          { success: true, message: 'Volatility metrics calculated for all markets' },
-          { headers: corsHeaders }
-        );
-      } catch (error) {
-        console.error('[API] Volatility calculation error:', error);
-        return Response.json(
-          {
-            success: false,
-            error: error instanceof Error ? error.message : 'Volatility calculation failed',
-            stack: error instanceof Error ? error.stack : undefined
-          },
-          { status: 500, headers: corsHeaders }
-        );
-      }
-    case '/api/admin/calculate-volatility-for':
-      // Calculate volatility for specific market
-      try {
-        const targetExchange = url.searchParams.get('exchange');
-        const targetSymbol = url.searchParams.get('symbol');
-
-        if (!targetExchange || !targetSymbol) {
-          return Response.json(
-            { success: false, error: 'Missing exchange or symbol parameter' },
-            { status: 400, headers: corsHeaders }
-          );
-        }
-
-        console.log(`[API] Calculating volatility for ${targetExchange}/${targetSymbol}`);
-        const { calculateVolatilityMetrics } = await import('./volatility');
-
-        // Get original_symbol from normalized_tokens
-        const tokenResult = await env.DB_READ.prepare(`
-          SELECT original_symbol FROM normalized_tokens
-          WHERE exchange = ? AND symbol = ?
-        `).bind(targetExchange, targetSymbol).first();
-
-        if (!tokenResult) {
-          return Response.json(
-            { success: false, error: 'Market not found' },
-            { status: 404, headers: corsHeaders }
-          );
-        }
-
-        const originalSymbol = (tokenResult as any).original_symbol;
-        const metrics = await calculateVolatilityMetrics(env, targetExchange, originalSymbol);
-
-        if (!metrics) {
-          return Response.json(
-            { success: false, error: 'Failed to calculate metrics (insufficient data)' },
-            { status: 500, headers: corsHeaders }
-          );
-        }
-
-        // Update normalized_tokens
-        await env.DB_READ.prepare(`
-        UPDATE normalized_tokens
-          SET volatility_24h = ?, volatility_7d = ?, atr_14 = ?, bb_width = ?
-          WHERE exchange = ? AND symbol = ?
-        `).bind(
-          metrics.volatility_24h,
-          metrics.volatility_7d,
-          metrics.atr_14,
-          metrics.bb_width,
-          targetExchange,
-          targetSymbol
-        ).run();
-
-        // Insert/update volatility_stats
-        await env.DB_WRITE.prepare(`
-        INSERT INTO volatility_stats (
-            exchange, symbol, period, volatility, atr, bb_width, std_dev,
-            high, low, avg_price, calculated_at
-          ) VALUES (?, ?, '24h', ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(exchange, symbol, period)
-          DO UPDATE SET
-            volatility = excluded.volatility,
-            atr = excluded.atr,
-            bb_width = excluded.bb_width,
-            std_dev = excluded.std_dev,
-            high = excluded.high,
-            low = excluded.low,
-            avg_price = excluded.avg_price,
-            calculated_at = excluded.calculated_at
-        `).bind(
-          targetExchange,
-          originalSymbol,
-          metrics.volatility_24h,
-          metrics.atr_14,
-          metrics.bb_width,
-          metrics.price_std_dev,
-          metrics.high_24h,
-          metrics.low_24h,
-          metrics.avg_price_24h,
-          Math.floor(Date.now() / 1000)
-        ).run();
-
-        console.log(`[API] Volatility calculated for ${targetExchange}/${targetSymbol}`);
-        return Response.json(
-          { success: true, data: metrics },
-          { headers: corsHeaders }
-        );
-      } catch (error) {
-        console.error('[API] Volatility calculation error:', error);
-        return Response.json(
-          {
-            success: false,
-            error: error instanceof Error ? error.message : 'Volatility calculation failed',
-            stack: error instanceof Error ? error.stack : undefined
-          },
-          { status: 500, headers: corsHeaders }
-        );
-      }
-    default:
-      // Handle dynamic routes like /api/tokens/{symbol}/history
-      if (path.startsWith('/api/tokens/') && path.endsWith('/history')) {
-        const pathParts = path.split('/');
-        const symbol = pathParts[3]; // /api/tokens/{symbol}/history
-        
-        if (symbol) {
-          // Create a new URL with symbol as query parameter
-          const modifiedUrl = new URL(url.toString());
-          modifiedUrl.searchParams.set('symbol', symbol.toUpperCase());
-          
-          // Forward to getNormalizedData which supports both from and to parameters
-          return await getNormalizedData(env, modifiedUrl, corsHeaders);
-        }
-      }
-      
-      return new Response('API endpoint not found', {
-        status: 404,
-        headers: corsHeaders,
-      });
-  }
-}
-
 // Normalize symbol names to a common format (base asset)
 function normalizeSymbol(symbol: string): string {
   // Remove exchange-specific prefixes first
@@ -910,116 +704,7 @@ function calculateFundingRates(fundingRate: number, exchange: string, intervalHo
   };
 }
 
-/**
- * Health Check for WebSocket Trackers
- *
- * Checks if WebSocket-based trackers are connected and receiving data.
- * If a tracker is disconnected or hasn't received messages recently, it triggers a reconnect.
- *
- * Runs every 5 minutes via cron job.
- *
- * WebSocket trackers: Lighter, Paradex, Pacifica, EdgeX
- * Polling trackers (skipped): Hyperliquid, Aster, Extended
- */
-async function checkTrackerHealth(env: Env): Promise<void> {
-  try {
-    console.log('[Health Check] Starting tracker health check (WebSocket + Polling trackers)');
-
-    const trackers = [
-      { name: 'lighter', binding: env.LIGHTER_TRACKER },
-      { name: 'paradex', binding: env.PARADEX_TRACKER },
-      { name: 'pacifica', binding: env.PACIFICA_TRACKER },
-      { name: 'edgex', binding: env.EDGEX_TRACKER },
-      { name: 'hyperliquid', binding: env.HYPERLIQUID_TRACKER },
-      { name: 'aster', binding: env.ASTER_TRACKER },
-      { name: 'extended', binding: env.EXTENDED_TRACKER },
-      { name: 'hyena', binding: env.HYENA_TRACKER },
-      { name: 'xyz', binding: env.XYZ_TRACKER },
-      { name: 'flx', binding: env.FLX_TRACKER },
-      { name: 'vntl', binding: env.VNTL_TRACKER },
-      { name: 'km', binding: env.KM_TRACKER },
-      { name: 'variational', binding: env.VARIATIONAL_TRACKER },
-    ];
-
-    const results: Array<{ name: string; status: string; action: string }> = [];
-
-    for (const tracker of trackers) {
-      try {
-        // Get Durable Object stub
-        const id = tracker.binding.idFromName(`${tracker.name}-main`);
-        const stub = tracker.binding.get(id);
-
-        // Check tracker status
-        const statusResponse = await stub.fetch(new Request('https://dummy/status'));
-        const statusData = await statusResponse.json() as any;
-
-        const connected = statusData.data?.connected;
-        const bufferSize = statusData.data?.bufferSize || 0;
-        const isRunning = statusData.data?.isRunning;
-
-        // For WebSocket trackers (lighter, paradex, pacifica, edgex): check connected and bufferSize
-        // For polling trackers (hyperliquid, aster, extended): check isRunning
-        const isPollingTracker = ['hyperliquid', 'aster', 'extended'].includes(tracker.name);
-        const isHealthy = isPollingTracker
-          ? (isRunning !== false)  // For polling trackers, just check if running
-          : (connected && bufferSize > 0);  // For WebSocket trackers, check connected AND has data
-
-        console.log(`[Health Check] ${tracker.name}: ${isPollingTracker ? 'isRunning=' + isRunning : 'connected=' + connected + ', bufferSize=' + bufferSize}`);
-
-        // If unhealthy, trigger restart
-        if (!isHealthy) {
-          console.warn(`[Health Check] ${tracker.name} is unhealthy - triggering ${isPollingTracker ? 'restart' : 'reconnect'}`);
-
-          // Trigger restart
-          const startResponse = await stub.fetch(new Request('https://dummy/start'));
-          const startData = await startResponse.json() as any;
-
-          results.push({
-            name: tracker.name,
-            status: isHealthy ? 'healthy' : (isPollingTracker ? 'not_running' : (connected ? 'connected_no_data' : 'disconnected')),
-            action: startData.success ? 'restarted' : 'restart_failed'
-          });
-
-          console.log(`[Health Check] ${tracker.name} restart result:`, startData.success ? 'SUCCESS' : 'FAILED');
-        } else {
-          results.push({
-            name: tracker.name,
-            status: 'healthy',
-            action: 'none'
-          });
-        }
-      } catch (error) {
-        console.error(`[Health Check] Failed to check ${tracker.name}:`, error);
-        results.push({
-          name: tracker.name,
-          status: 'error',
-          action: 'check_failed'
-        });
-      }
-    }
-
-    // Log summary
-    const unhealthy = results.filter(r => r.action !== 'none');
-    if (unhealthy.length > 0) {
-      console.warn(`[Health Check] Found ${unhealthy.length} unhealthy tracker(s):`, unhealthy);
-    } else {
-      console.log('[Health Check] All trackers are healthy');
-    }
-
-    // Update database with health check timestamp
-    await env.DB_WRITE.prepare(`
-        UPDATE tracker_status
-       SET updated_at = ?
-       WHERE exchange IN ('lighter', 'paradex', 'pacifica', 'edgex')`
-    )
-      .bind(Math.floor(Date.now() / 1000))
-      .run();
-
-    console.log('[Health Check] Completed successfully');
-  } catch (error) {
-    console.error('[Health Check] Failed:', error);
-  }
-}
+// Old checkTrackerHealth function removed - Durable Object trackers archived
 
 // Update normalized_tokens table with latest data from all exchanges
 async function updateNormalizedTokens(env: Env): Promise<void> {

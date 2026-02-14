@@ -561,13 +561,10 @@ export class LighterTracker implements DurableObject {
         const openInterest = parseFloat(getValue(stats.open_interest, '0'));
         const openInterestUsd = (openInterest * 2).toString();
 
-        // Lighter liefert Funding Rates als Prozentwerte (z.B. "0.0012" = 0.12%)
-        // Andere Exchanges liefern Dezimalwerte (z.B. "0.000012" = 0.0012%)
-        // Daher müssen wir Lighter-Werte durch 100 teilen für Konsistenz
-        const fundingRateRaw = getValue(stats.funding_rate, '0');
-        const currentFundingRateRaw = getValue(stats.current_funding_rate, '0');
-        const fundingRate = (parseFloat(fundingRateRaw) / 100).toString();
-        const currentFundingRate = (parseFloat(currentFundingRateRaw) / 100).toString();
+        // Lighter liefert Funding Rates bereits als Dezimalwerte wie andere Exchanges
+        // Keine Konvertierung notwendig
+        const fundingRate = getValue(stats.funding_rate, '0');
+        const currentFundingRate = getValue(stats.current_funding_rate, '0');
 
         records.push({
           exchange: 'lighter',

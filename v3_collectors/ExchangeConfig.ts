@@ -79,8 +79,8 @@ export const EXCHANGE_CONFIGS: Record<string, ExchangeConfig> = {
   
   lighter: {
     name: 'Lighter',
-    rateFormat: 'decimal',
-    conversionFactor: 100,  // 0.0001 → 0.01%
+    rateFormat: 'percent',  // API returns percent values directly (0.01 = 0.01%)
+    conversionFactor: 1,    // No conversion needed
     defaultIntervalHours: 8,
     hasVariableInterval: true,
     apiBaseUrl: 'https://mainnet.zklighter.elliot.ai/api/v1',
@@ -223,6 +223,22 @@ export const EXCHANGE_CONFIGS: Record<string, ExchangeConfig> = {
     dynamicMarkets: true
   },
   
+  ethereal: {
+    name: 'Ethereal',
+    rateFormat: 'decimal',
+    conversionFactor: 100,  // -0.000008856 → -0.0008856%
+    defaultIntervalHours: 1,  // fundingRate1h is already 1h rate
+    hasVariableInterval: false,
+    apiBaseUrl: 'https://api.ethereal.trade',
+    requiresUserAgent: false,
+    validation: {
+      minRatePercent: -10,
+      maxRatePercent: 10,
+      warnThreshold: 1
+    },
+    dynamicMarkets: true
+  },
+
   edgex: {
     name: 'EdgeX',
     rateFormat: 'decimal',

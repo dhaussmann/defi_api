@@ -56,14 +56,11 @@ while IFS='|' read -r SYMBOL BASE_ASSET; do
     continue
   fi
   
-  # Calculate interval from data (median)
+  # Calculate interval from data - simplified approach
   INTERVAL_HOURS=$(echo "$FUNDINGS" | jq -r '
     if (. | length) > 1 then
-      [.[1:] as $tail | .[:-1] as $head | 
-       [$tail, $head] | transpose | 
-       map(.[0].fundingTime - .[1].fundingTime)] | 
-      sort | 
-      .[length/2 | floor] / (60 * 60 * 1000) | round
+      ((.[1].fundingTime | tonumber) - (.[0].fundingTime | tonumber)) / (60 * 60 * 1000) | 
+      if . > 0 then round else 8 end
     else
       8
     end
