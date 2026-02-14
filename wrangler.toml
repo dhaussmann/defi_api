@@ -3,70 +3,20 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Durable Objects
-[durable_objects]
-bindings = [
-  { name = "LIGHTER_TRACKER", class_name = "LighterTracker" },
-  { name = "PARADEX_TRACKER", class_name = "ParadexTracker" },
-  { name = "HYPERLIQUID_TRACKER", class_name = "HyperliquidTracker" },
-  { name = "EDGEX_TRACKER", class_name = "EdgeXTracker" },
-  { name = "ASTER_TRACKER", class_name = "AsterTracker" },
-  { name = "PACIFICA_TRACKER", class_name = "PacificaTracker" },
-  { name = "EXTENDED_TRACKER", class_name = "ExtendedTracker" },
-  { name = "HYENA_TRACKER", class_name = "HyENATracker" },
-  { name = "XYZ_TRACKER", class_name = "XYZTracker" },
-  { name = "FLX_TRACKER", class_name = "FLXTracker" },
-  { name = "VNTL_TRACKER", class_name = "VNTLTracker" },
-  { name = "KM_TRACKER", class_name = "KMTracker" },
-  { name = "VARIATIONAL_TRACKER", class_name = "VariationalTracker" }
-]
+# Old Durable Objects removed - using V3 collectors instead
+# Tracker files archived in src/Archive/old_trackers/
 
+# Migration to delete old Durable Objects
 [[migrations]]
-tag = "v1"
-new_classes = ["LighterTracker"]
-
-[[migrations]]
-tag = "v2"
-new_classes = ["ParadexTracker"]
-
-[[migrations]]
-tag = "v3"
-new_classes = ["HyperliquidTracker"]
-
-[[migrations]]
-tag = "v4"
-new_classes = ["EdgeXTracker"]
-
-[[migrations]]
-tag = "v5"
-new_classes = ["AsterTracker"]
-
-[[migrations]]
-tag = "v6"
-new_classes = ["PacificaTracker"]
-
-[[migrations]]
-tag = "v7"
-new_classes = ["ExtendedTracker"]
-
-[[migrations]]
-tag = "v8"
-new_classes = ["HyENATracker"]
-
-[[migrations]]
-tag = "v9"
-new_classes = ["XYZTracker", "FLXTracker", "VNTLTracker", "KMTracker"]
-
-[[migrations]]
-tag = "v10"
-new_classes = ["VariationalTracker"]
+tag = "v11"
+deleted_classes = ["LighterTracker", "ParadexTracker", "HyperliquidTracker", "EdgeXTracker", "AsterTracker", "PacificaTracker", "ExtendedTracker", "HyENATracker", "XYZTracker", "FLXTracker", "VNTLTracker", "KMTracker", "VariationalTracker"]
 
 
 # Environment Variables (optional)
 [vars]
 SNAPSHOT_INTERVAL_MS = "15000"
 
-# Cron Triggers - Two-Tier Aggregation System
+# Cron Triggers - Multi-Schedule System
 # 1. Every 5 minutes: Health check + tokens update + 1-minute aggregation
 #    - WebSocket health monitoring (Lighter, Paradex, Pacifica, EdgeX)
 #    - Updates normalized_tokens table (825 UPSERTs × 12 = 9,900/hour)
@@ -76,8 +26,22 @@ SNAPSHOT_INTERVAL_MS = "15000"
 #    - Aggregates 1-minute data → hourly aggregates (data >1h old)
 #    - Deletes aggregated 1-minute data (reduces DB by ~60×)
 #    - Final compression: 240× reduction (15s → 1h via 1m intermediate)
+# 3. V2 Exchange Collection (Separate schedules to avoid timeouts):
+#    - 2 * * * *: Binance (581 symbols, slowest)
+#    - 7 * * * *: Extended (269 markets)
+#    - 12 * * * *: Hyperliquid (190 coins)
+#    - 17 * * * *: Lighter (105 markets)
+#    - 22 * * * *: Aster (169 markets, variable intervals)
+# Cron schedules:
+# - */5 * * * *: 5-minute tasks (health check, tokens update, 1m aggregation)
+# - 0 * * * *: Hourly aggregation and cleanup
+# - 2 * * * *: V2 Binance collection (581 symbols)
+# - 7 * * * *: V2 Extended collection (269 markets)
+# - 12 * * * *: V2 Hyperliquid collection (190 coins)
+# - 17 * * * *: V2 Lighter collection (105 markets)
+# - 22 * * * *: V2 Aster collection (169 markets)
 [triggers]
-crons = ["*/5 * * * *", "0 * * * *"]
+crons = ["*/5 * * * *", "0 * * * *", "5 * * * *", "10 * * * *"]
 
 # D1 Databases - 2-DB Architecture for Load Distribution
 [[d1_databases]]
@@ -100,3 +64,15 @@ binding = "DB"
 database_name = "defiapi-db"
 database_id = "77ba166f-0989-45d4-aa63-dc4ff0d517cb"
 remote = true
+
+# Unified Funding Rates Database - Separate DB for V3 aggregated data
+[[d1_databases]]
+binding = "DB_UNIFIED"
+database_name = "defiapi-unified-funding"
+database_id = "1d30f80b-a06a-423d-855e-21c3cddb2ce9"
+remote = true
+
+# KV Cache for API responses
+[[kv_namespaces]]
+binding = "CACHE"
+id = "8124b8328dbd42619880990694a98b9f"
