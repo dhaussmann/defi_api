@@ -41,7 +41,7 @@ SNAPSHOT_INTERVAL_MS = "15000"
 # - 17 * * * *: V2 Lighter collection (105 markets)
 # - 22 * * * *: V2 Aster collection (169 markets)
 [triggers]
-crons = ["*/5 * * * *", "0 * * * *", "5 * * * *", "10 * * * *"]
+crons = ["*/5 * * * *", "0 * * * *", "5 * * * *", "10 * * * *", "15 * * * *"]
 
 # D1 Databases - 2-DB Architecture for Load Distribution
 [[d1_databases]]

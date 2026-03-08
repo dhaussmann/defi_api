@@ -78,17 +78,16 @@ export default {
       }
     }
 
-    // Every hour at :05: Heavy tasks - MA cache, Arbitrage, KV warmup
-    // Separated from 5-min cron to stay under 1000 subrequest limit
+    // Every hour at :05: Daily MA periods (3d/7d/14d/30d) from raw data + legacy MA cache
     if (cronType === '5 * * * *') {
       try {
-        console.log('[Cron] Calculating and caching moving averages');
+        console.log('[Cron] Calculating and caching moving averages (legacy cache)');
         await calculateAndCacheFundingMAs(env);
 
         // Calculate each daily MA period separately with individual error handling
         for (const period of ['3d', '7d', '14d', '30d']) {
           try {
-            console.log(`[Cron] Calculating ${period} MA from 24h snapshots`);
+            console.log(`[Cron] Calculating ${period} MA from raw data`);
             const r = await calculateSingleDailyMA(env, period);
             console.log(`[Cron] ${period} MA result:`, r.message);
           } catch (e) {
@@ -96,19 +95,13 @@ export default {
           }
         }
 
-        console.log('[Cron] Calculating V3 arbitrage opportunities');
-        await calculateArbitrageV3(env);
-
-        console.log('[Cron] Warming up KV cache for expensive endpoints');
-        await warmupCache(env, 'https://api.fundingrate.de');
-
-        console.log('[Cron] Hourly heavy tasks completed successfully');
+        console.log('[Cron] :05 tasks completed successfully');
       } catch (error) {
-        console.error('[Cron] Error in hourly heavy tasks:', error);
+        console.error('[Cron] Error in :05 tasks:', error);
       }
     }
 
-    // Every hour at :10: Calculate moving averages (detailed per-exchange)
+    // Every hour at :10: Calculate 24h moving averages (detailed per-exchange)
     if (cronType === '10 * * * *') {
       try {
         console.log('[Cron] Starting moving average calculation (24h from raw data)');
@@ -116,6 +109,21 @@ export default {
         console.log('[Cron] 24h MA calculation completed:', maResult);
       } catch (error) {
         console.error('[Cron] Error in MA calculation:', error);
+      }
+    }
+
+    // Every hour at :15: Arbitrage + KV warmup (runs AFTER 24h MA at :10 is complete)
+    if (cronType === '15 * * * *') {
+      try {
+        console.log('[Cron] Calculating V3 arbitrage opportunities');
+        await calculateArbitrageV3(env);
+
+        console.log('[Cron] Warming up KV cache for expensive endpoints');
+        await warmupCache(env, 'https://api.fundingrate.de');
+
+        console.log('[Cron] :15 arbitrage + KV warmup completed successfully');
+      } catch (error) {
+        console.error('[Cron] Error in :15 tasks:', error);
       }
     }
 

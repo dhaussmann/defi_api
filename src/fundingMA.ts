@@ -345,11 +345,12 @@ export async function calculateSingleDailyMA(env: Env, period: string): Promise<
         ? as period_end
       FROM unified_v3 u
       INNER JOIN (
-        SELECT normalized_symbol, exchange, MIN(funding_time) as first_seen
+        SELECT normalized_symbol, exchange,
+          CASE WHEN MIN(funding_time) > 10000000000 THEN MIN(funding_time)/1000 ELSE MIN(funding_time) END as first_seen_sec
         FROM unified_v3
         WHERE rate_1h_percent IS NOT NULL
         GROUP BY normalized_symbol, exchange
-        HAVING MIN(funding_time) <= ?
+        HAVING CASE WHEN MIN(funding_time) > 10000000000 THEN MIN(funding_time)/1000 ELSE MIN(funding_time) END <= ?
       ) eligible ON u.normalized_symbol = eligible.normalized_symbol
                  AND u.exchange = eligible.exchange
       WHERE u.rate_1h_percent IS NOT NULL
