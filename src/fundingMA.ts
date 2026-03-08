@@ -683,35 +683,32 @@ export async function getLatestMAAll(
 ): Promise<any> {
   if (exchange === '*') {
     // All symbols × all periods × all exchanges individually
+    // Direct GROUP BY on recent 2h window to avoid full 4M+ row scan.
+    // Relies on idx_funding_ma_sym_exch_period_calc.
+    const recentCutoff = Math.floor(Date.now() / 1000) - 7200;
     const query = await env.DB_UNIFIED.prepare(`
-      SELECT 
-        f.normalized_symbol,
-        f.exchange,
-        f.period,
-        f.ma_rate_1h,
-        f.ma_apr,
-        f.data_points,
-        f.std_dev,
-        f.calculated_at
-      FROM funding_ma f
-      INNER JOIN (
-        SELECT normalized_symbol, exchange, period, MAX(calculated_at) as max_calc
-        FROM funding_ma
-        WHERE ma_rate_1h IS NOT NULL
-        GROUP BY normalized_symbol, exchange, period
-      ) latest ON f.normalized_symbol = latest.normalized_symbol
-               AND f.exchange = latest.exchange
-               AND f.period = latest.period
-               AND f.calculated_at = latest.max_calc
-      ORDER BY f.normalized_symbol, f.exchange,
-        CASE f.period
+      SELECT
+        normalized_symbol,
+        exchange,
+        period,
+        ma_rate_1h,
+        ma_apr,
+        data_points,
+        std_dev,
+        MAX(calculated_at) as calculated_at
+      FROM funding_ma
+      WHERE ma_rate_1h IS NOT NULL
+        AND calculated_at >= ?
+      GROUP BY normalized_symbol, exchange, period
+      ORDER BY normalized_symbol, exchange,
+        CASE period
           WHEN '24h' THEN 1
           WHEN '3d' THEN 2
           WHEN '7d' THEN 3
           WHEN '14d' THEN 4
           WHEN '30d' THEN 5
         END
-    `).all();
+    `).bind(recentCutoff).all();
 
     const records = query.results || [];
 
@@ -750,36 +747,33 @@ export async function getLatestMAAll(
       data,
     };
   } else if (exchange && exchange !== 'all') {
+    const recentCutoff = Math.floor(Date.now() / 1000) - 7200;
+    // Use single GROUP BY query to get latest ma_rate_1h per symbol/period for this exchange.
+    // Avoids the expensive JOIN; relies on idx_funding_ma_exch_period_calc.
     const query = await env.DB_UNIFIED.prepare(`
-      SELECT 
-        f.normalized_symbol,
-        f.exchange,
-        f.period,
-        f.ma_rate_1h,
-        f.ma_apr,
-        f.data_points,
-        f.std_dev,
-        f.calculated_at
-      FROM funding_ma f
-      INNER JOIN (
-        SELECT normalized_symbol, period, MAX(calculated_at) as max_calc
-        FROM funding_ma
-        WHERE exchange = ?
-          AND ma_rate_1h IS NOT NULL
-        GROUP BY normalized_symbol, period
-      ) latest ON f.normalized_symbol = latest.normalized_symbol
-               AND f.period = latest.period
-               AND f.calculated_at = latest.max_calc
-      WHERE f.exchange = ?
-      ORDER BY f.normalized_symbol,
-        CASE f.period
+      SELECT
+        normalized_symbol,
+        exchange,
+        period,
+        ma_rate_1h,
+        ma_apr,
+        data_points,
+        std_dev,
+        MAX(calculated_at) as calculated_at
+      FROM funding_ma
+      WHERE exchange = ?
+        AND ma_rate_1h IS NOT NULL
+        AND calculated_at >= ?
+      GROUP BY normalized_symbol, period
+      ORDER BY normalized_symbol,
+        CASE period
           WHEN '24h' THEN 1
           WHEN '3d' THEN 2
           WHEN '7d' THEN 3
           WHEN '14d' THEN 4
           WHEN '30d' THEN 5
         END
-    `).bind(exchange, exchange).all();
+    `).bind(exchange, recentCutoff).all();
 
     const records = query.results || [];
 
@@ -809,35 +803,33 @@ export async function getLatestMAAll(
       data,
     };
   } else {
+    const recentCutoff = Math.floor(Date.now() / 1000) - 7200;
+    // Direct GROUP BY to get latest values per symbol/period — avoids expensive JOIN.
+    // Relies on idx_funding_ma_cross_period_calc.
     const query = await env.DB_UNIFIED.prepare(`
-      SELECT 
-        f.normalized_symbol,
-        f.period,
-        f.avg_ma_rate_1h,
-        f.avg_ma_apr,
-        f.weighted_ma_rate_1h,
-        f.weighted_ma_apr,
-        f.exchange_count,
-        f.total_data_points,
-        f.spread,
-        f.calculated_at
-      FROM funding_ma_cross f
-      INNER JOIN (
-        SELECT normalized_symbol, period, MAX(calculated_at) as max_calc
-        FROM funding_ma_cross
-        GROUP BY normalized_symbol, period
-      ) latest ON f.normalized_symbol = latest.normalized_symbol
-               AND f.period = latest.period
-               AND f.calculated_at = latest.max_calc
-      ORDER BY f.normalized_symbol,
-        CASE f.period
+      SELECT
+        normalized_symbol,
+        period,
+        avg_ma_rate_1h,
+        avg_ma_apr,
+        weighted_ma_rate_1h,
+        weighted_ma_apr,
+        exchange_count,
+        total_data_points,
+        spread,
+        MAX(calculated_at) as calculated_at
+      FROM funding_ma_cross
+      WHERE calculated_at >= ?
+      GROUP BY normalized_symbol, period
+      ORDER BY normalized_symbol,
+        CASE period
           WHEN '24h' THEN 1
           WHEN '3d' THEN 2
           WHEN '7d' THEN 3
           WHEN '14d' THEN 4
           WHEN '30d' THEN 5
         END
-    `).all();
+    `).bind(recentCutoff).all();
 
     const records = query.results || [];
 
