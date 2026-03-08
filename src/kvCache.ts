@@ -25,15 +25,15 @@ interface CacheConfig {
 const CACHE_CONFIGS: Record<string, CacheConfig> = {
   '/api/v3/funding/rates/latest': { ttl: 60, prefix: 'latest' },
   '/api/v3/funding/rates/bulk': { ttl: 60, prefix: 'bulk-rates' },
-  '/api/v3/funding/ma/bulk': { ttl: 300, prefix: 'bulk-ma' },
+  '/api/v3/funding/ma/bulk': { ttl: 3600, prefix: 'bulk-ma' },   // MA changes hourly
   '/api/v3/symbols': { ttl: 3600, prefix: 'symbols' },
-  '/api/v3/arbitrage': { ttl: 300, prefix: 'arb' },
+  '/api/v3/arbitrage': { ttl: 3600, prefix: 'arb' },             // Arbitrage recalculated hourly
   '/api/v3/funding/summary': { ttl: 60, prefix: 'summary' },
   '/api/v3/funding/rates': { ttl: 60, prefix: 'rates' },
   '/api/v3/funding/apr': { ttl: 60, prefix: 'apr' },
-  '/api/v3/funding/ma': { ttl: 300, prefix: 'ma' },
-  '/api/v3/funding/ma/latest': { ttl: 300, prefix: 'ma-latest' },
-  '/api/v3/funding/ma/latest/all': { ttl: 300, prefix: 'ma-latest-all' },
+  '/api/v3/funding/ma': { ttl: 3600, prefix: 'ma' },             // MA changes hourly
+  '/api/v3/funding/ma/latest': { ttl: 3600, prefix: 'ma-latest' },
+  '/api/v3/funding/ma/latest/all': { ttl: 3600, prefix: 'ma-latest-all' },
 };
 
 /**
@@ -156,35 +156,46 @@ export async function warmupCache(env: Env, baseUrl: string): Promise<void> {
   if (!env.CACHE) return;
 
   const warmupUrls = [
+    // Funding rates latest (most-visited)
     '/api/v3/funding/rates/latest?sort=apr&order=desc',
     '/api/v3/funding/rates/latest?sort=symbol&order=asc',
     '/api/v3/symbols',
-    // Arbitrage pre-warming for all periods
+    // Arbitrage - all periods
     '/api/v3/arbitrage?period=live',
     '/api/v3/arbitrage?period=24h',
     '/api/v3/arbitrage?period=3d',
     '/api/v3/arbitrage?period=7d',
     '/api/v3/arbitrage?period=14d',
     '/api/v3/arbitrage?period=30d',
-    // MA latest/all pre-warming
+    '/api/v3/arbitrage?stable=true',
+    // MA latest/all - cross-exchange and per-exchange
     '/api/v3/funding/ma/latest/all',
     '/api/v3/funding/ma/latest/all?exchange=*',
     '/api/v3/funding/ma/latest/all?exchange=hyperliquid',
     '/api/v3/funding/ma/latest/all?exchange=extended',
+    '/api/v3/funding/ma/latest/all?exchange=aster',
+    '/api/v3/funding/ma/latest/all?exchange=paradex',
+    '/api/v3/funding/ma/latest/all?exchange=lighter',
+    '/api/v3/funding/ma/latest/all?exchange=edgex',
   ];
 
-  let warmed = 0;
-  for (const urlPath of warmupUrls) {
-    try {
+  // Run all warmup requests in parallel for speed
+  const results = await Promise.allSettled(
+    warmupUrls.map(async (urlPath) => {
       const response = await fetch(`${baseUrl}${urlPath}`);
-      if (response.ok) {
-        warmed++;
+      await response.text(); // consume body to avoid connection leak
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    })
+  );
+
+  const warmed = results.filter(r => r.status === 'fulfilled').length;
+  const failed = results.filter(r => r.status === 'rejected');
+  if (failed.length > 0) {
+    failed.forEach((f, i) => {
+      if (f.status === 'rejected') {
+        console.error(`[KV Cache] Warmup failed for ${warmupUrls[i]}: ${f.reason}`);
       }
-      // Consume body to avoid connection leak
-      await response.text();
-    } catch (error) {
-      console.error(`[KV Cache] Warmup failed for ${urlPath}:`, error);
-    }
+    });
   }
   console.log(`[KV Cache] Warmed ${warmed}/${warmupUrls.length} endpoints`);
 }

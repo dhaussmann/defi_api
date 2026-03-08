@@ -112,18 +112,26 @@ export default {
       }
     }
 
-    // Every hour at :15: Arbitrage + KV warmup (runs AFTER 24h MA at :10 is complete)
+    // Every hour at :15: Arbitrage (runs AFTER 24h MA at :10 is complete)
     if (cronType === '15 * * * *') {
       try {
         console.log('[Cron] Calculating V3 arbitrage opportunities');
         await calculateArbitrageV3(env);
-
-        console.log('[Cron] Warming up KV cache for expensive endpoints');
-        await warmupCache(env, 'https://api.fundingrate.de');
-
-        console.log('[Cron] :15 arbitrage + KV warmup completed successfully');
+        console.log('[Cron] :15 arbitrage completed successfully');
       } catch (error) {
         console.error('[Cron] Error in :15 tasks:', error);
+      }
+    }
+
+    // Every hour at :20: KV cache warmup (runs AFTER all heavy DB work is done)
+    // Ensures users get cached responses instead of hitting overloaded D1
+    if (cronType === '20 * * * *') {
+      try {
+        console.log('[Cron] Warming up KV cache for expensive endpoints');
+        await warmupCache(env, 'https://api.fundingrate.de');
+        console.log('[Cron] :20 KV warmup completed successfully');
+      } catch (error) {
+        console.error('[Cron] Error in :20 KV warmup:', error);
       }
     }
 
