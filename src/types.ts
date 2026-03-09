@@ -340,8 +340,15 @@ export interface Env {
   DB_WRITE: D1Database;    // Hot data: market_stats, aggregates, tracker_status, V3 tables
   DB_READ: D1Database;     // API queries: normalized_tokens
   DB_UNIFIED: D1Database;  // V3 aggregated data: unified_funding_rates (cross-exchange)
+  DB_V4: D1Database;       // V4 latest snapshots: unified_v4 table (separate from V3 load)
   DB: D1Database;          // Backup: Keep old DB during migration
   CACHE: KVNamespace;      // KV Cache for API responses
+  // V4 Market Data
+  V4_ANALYTICS: AnalyticsEngineDataset;     // V4 time-series storage (Analytics Engine)
+  V4_MA_ANALYTICS: AnalyticsEngineDataset;  // V4 moving averages history (Analytics Engine)
+  CF_ACCOUNT_ID: string;                 // Cloudflare Account ID (for AE SQL API reads)
+  CF_API_TOKEN: string;                  // Cloudflare API Token (for AE SQL API reads)
+  ADMIN_KEY: string;                     // Secret for /api/v4/admin/* endpoints
   SNAPSHOT_INTERVAL_MS?: string;
 }
 

@@ -34,6 +34,11 @@ const CACHE_CONFIGS: Record<string, CacheConfig> = {
   '/api/v3/funding/ma': { ttl: 3600, prefix: 'ma' },             // MA changes hourly
   '/api/v3/funding/ma/latest': { ttl: 3600, prefix: 'ma-latest' },
   '/api/v3/funding/ma/latest/all': { ttl: 3600, prefix: 'ma-latest-all' },
+  // V4 endpoints
+  '/api/v4/markets': { ttl: 300, prefix: 'v4-markets' },
+  '/api/v4/markets/latest': { ttl: 300, prefix: 'v4-latest' },
+  '/api/v4/ma/latest': { ttl: 300, prefix: 'v4-ma-latest' },
+  '/api/v4/arbitrage': { ttl: 300, prefix: 'v4-arb' },
 };
 
 /**

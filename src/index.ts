@@ -10,6 +10,9 @@ import { syncAllV3ToUnified, syncImportsToUnified, syncExchangeToUnified, getUni
 import { calculateFundingMA, calculateSingleDailyMA, calculateAllDailyMAs, queryFundingMA, getLatestMA, getLatestMAAll } from './fundingMA';
 import { calculateArbitrageV3, queryArbitrageV3 } from './arbitrageV3';
 import { withCache, warmupCache } from './kvCache';
+import { collectV4Markets } from './v4Collector';
+import { handleV4Request } from './v4Api';
+import { calculateV4MAs } from './v4MA';
 import { collectExtendedV3 } from '../v3_collectors/ExtendedCollector';
 import { collectHyperliquidV3 } from '../v3_collectors/HyperliquidCollector';
 import { collectParadexV3 } from '../v3_collectors/ParadexCollector';
@@ -71,6 +74,14 @@ export default {
         // Sync V3 data to unified table every 5 min for fresh data
         console.log('[Cron] Syncing V3 data to unified_v3');
         await syncAllV3ToUnified(env);
+
+        // V4 market data collection (all 26 exchanges, dual-write to AE + D1)
+        console.log('[Cron] Starting V4 market data collection');
+        ctx.waitUntil(collectV4Markets(env).catch(e => console.error('[Cron] V4 collection error:', e)));
+
+        // V4 moving average calculation (all 8 periods, from AE raw data)
+        console.log('[Cron] Starting V4 MA calculation');
+        ctx.waitUntil(calculateV4MAs(env).catch(e => console.error('[Cron] V4 MA error:', e)));
 
         console.log('[Cron] 5-minute tasks completed successfully');
       } catch (error) {
@@ -152,7 +163,7 @@ export default {
     }
   },
 
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -221,6 +232,25 @@ export default {
         return await withCache(env, path, url.searchParams, () => handleBulkFundingRates(env, url.searchParams));
       } else if (path === '/api/v3/funding/ma/bulk') {
         return await withCache(env, path, url.searchParams, () => handleBulkFundingMA(env, url.searchParams));
+      }
+
+      // V4 force-collect endpoint
+      if (path === '/api/v4/admin/collect' && request.method === 'POST') {
+        const adminKey = request.headers.get('X-Admin-Key');
+        if (!adminKey || adminKey !== env.ADMIN_KEY) {
+          return new Response(JSON.stringify({ success: false, error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+        }
+        collectV4Markets(env).catch(e => console.error('[V4 Force] collection error:', e));
+        return new Response(JSON.stringify({ success: true, message: 'V4 collection started' }), { headers: { 'Content-Type': 'application/json' } });
+      }
+
+      // V4 API endpoints
+      if (path.startsWith('/api/v4/')) {
+        const v4Cached = path === '/api/v4/markets' || path === '/api/v4/markets/latest' || path === '/api/v4/ma/latest' || path === '/api/v4/arbitrage';
+        if (v4Cached) {
+          return await withCache(env, path, url.searchParams, () => handleV4Request(request, env, ctx));
+        }
+        return await handleV4Request(request, env, ctx);
       }
 
       // Trackers auto-start themselves via their fetch() methods

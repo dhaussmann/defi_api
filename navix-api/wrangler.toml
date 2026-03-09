@@ -1,0 +1,28 @@
+name = "navix-api"
+main = "src/index.ts"
+compatibility_date = "2024-05-12"
+
+[vars]
+CORS_ORIGINS = "http://localhost:3000"
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "navix-db"
+database_id = "<YOUR_D1_DATABASE_ID>"
+
+# KV Namespace
+[[kv_namespaces]]
+binding = "MARKET_KV"
+id = "<YOUR_KV_NAMESPACE_ID>"
+
+# Analytics Engine (optional)
+# [[analytics_engine_datasets]]
+# binding = "FUNDING_RATES"
+
+# Secrets (set via `wrangler secret put`):
+# - CLOUDFLARE_ACCOUNT_ID
+# - ANALYTICS_ENGINE_API_TOKEN
+# - TELEGRAM_BOT_TOKEN
+# - EXPO_ACCESS_TOKEN
+# - INTERNAL_API_KEY

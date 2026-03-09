@@ -33,15 +33,24 @@ SNAPSHOT_INTERVAL_MS = "15000"
 #    - 17 * * * *: Lighter (105 markets)
 #    - 22 * * * *: Aster (169 markets, variable intervals)
 # Cron schedules:
-# - */5 * * * *: 5-minute tasks (health check, tokens update, 1m aggregation)
+# - */5 * * * *: 5-minute tasks (V3 collection, V4 collection, tokens update, 1m aggregation)
 # - 0 * * * *: Hourly aggregation and cleanup
-# - 2 * * * *: V2 Binance collection (581 symbols)
-# - 7 * * * *: V2 Extended collection (269 markets)
-# - 12 * * * *: V2 Hyperliquid collection (190 coins)
-# - 17 * * * *: V2 Lighter collection (105 markets)
-# - 22 * * * *: V2 Aster collection (169 markets)
+# - 5 * * * *: Daily MA periods (3d/7d/14d/30d)
+# - 10 * * * *: 24h moving averages
+# - 15 * * * *: V3 arbitrage opportunities
+# - 20 * * * *: KV cache warmup
 [triggers]
 crons = ["*/5 * * * *", "0 * * * *", "5 * * * *", "10 * * * *", "15 * * * *", "20 * * * *"]
+
+# Analytics Engine — V4 Market Data (time-series, 3 month retention)
+[[analytics_engine_datasets]]
+binding = "V4_ANALYTICS"
+dataset = "v4_markets"
+
+# Analytics Engine — V4 Moving Averages (time-series MA history)
+[[analytics_engine_datasets]]
+binding = "V4_MA_ANALYTICS"
+dataset = "v4_ma"
 
 # D1 Databases - 2-DB Architecture for Load Distribution
 [[d1_databases]]
@@ -71,6 +80,12 @@ binding = "DB_UNIFIED"
 database_name = "defiapi-unified-funding"
 database_id = "1d30f80b-a06a-423d-855e-21c3cddb2ce9"
 remote = true
+
+# V4 Markets Database - Separate DB for V4 latest snapshots
+[[d1_databases]]
+binding = "DB_V4"
+database_name = "defiapi-v4-markets"
+database_id = "d00a78db-0373-405a-8921-84c101e4c834"
 
 # KV Cache for API responses
 [[kv_namespaces]]
