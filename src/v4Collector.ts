@@ -115,33 +115,45 @@ export async function debugCollectV4(exchangeFilter?: string): Promise<V4DebugRe
 }
 
 /**
- * Main V4 collection entry point — called from :25 cron
+ * Main V4 collection entry point — called from cron every 5 minutes
+ * All exchanges collected in parallel to avoid Worker CPU timeout.
  */
 export async function collectV4Markets(env: Env): Promise<void> {
+  // Fetch all exchanges in parallel
+  const results = await Promise.allSettled(
+    EXCHANGE_COLLECTORS.map(({ key, fn }) =>
+      fn().then(markets => ({ key, markets }))
+    )
+  );
+
   let totalMarkets = 0;
   let failedExchanges = 0;
+  const d1Writes: Promise<void>[] = [];
 
-  for (const { key, fn } of EXCHANGE_COLLECTORS) {
-    try {
-      const markets = await fn();
-      if (markets.length === 0) {
-        console.log(`[V4] ${key}: 0 markets (empty response)`);
-        continue;
-      }
-
-      // Write to Analytics Engine (fire-and-forget)
-      writeToAnalyticsEngine(env, key, markets);
-
-      // Upsert latest snapshot to D1
-      await upsertV4Snapshot(env, key, markets);
-
-      console.log(`[V4] ${key}: ${markets.length} markets`);
-      totalMarkets += markets.length;
-    } catch (e) {
-      console.error(`[V4] ${key} failed:`, e);
+  for (const result of results) {
+    if (result.status === 'rejected') {
       failedExchanges++;
+      console.error(`[V4] exchange failed:`, result.reason);
+      continue;
     }
+    const { key, markets } = result.value;
+    if (markets.length === 0) {
+      console.log(`[V4] ${key}: 0 markets (empty response)`);
+      continue;
+    }
+
+    // Write to Analytics Engine (fire-and-forget)
+    writeToAnalyticsEngine(env, key, markets);
+
+    // Queue D1 upsert
+    d1Writes.push(upsertV4Snapshot(env, key, markets));
+
+    console.log(`[V4] ${key}: ${markets.length} markets`);
+    totalMarkets += markets.length;
   }
+
+  // Wait for all D1 writes to complete
+  await Promise.allSettled(d1Writes);
 
   console.log(`[V4] Collection complete: ${totalMarkets} markets from ${EXCHANGE_COLLECTORS.length - failedExchanges}/${EXCHANGE_COLLECTORS.length} exchanges`);
 }

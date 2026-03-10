@@ -759,11 +759,11 @@ export async function collectNado(): Promise<UnifiedMarketData[]> {
     .filter((c: any) => c.product_type === 'perpetual')
     .map((c: any) => {
       const baseTicker = c.base_currency.replace(/-PERP$/i, '').replace(/_USDT0?$/i, '');
-      const fundingRate1H = c.funding_rate || 0; // Nado uses 1h funding intervals
+      const fundingRate24H = c.funding_rate || 0; // Nado funding_rate is 24h rate (divide by 24 for hourly)
       return {
         ticker: baseTicker,
         marketPrice: c.mark_price || c.last_price || null,
-        fundingRateAPR: fundingRate1H * 24 * 365,
+        fundingRateAPR: fundingRate24H * 365,
         openInterest: c.open_interest_usd || null,
         maxLeverage: null,
         volume24h: c.quote_volume || null,

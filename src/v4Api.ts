@@ -258,7 +258,7 @@ async function handleHistory(env: Env, symbol: string, params: URLSearchParams):
     sql += ` AND blob2 = '${exchange.replace(/'/g, "''")}'`;
   }
 
-  sql += ` ORDER BY double1 DESC LIMIT ${limit}`;
+  sql += ` ORDER BY collected_at DESC LIMIT ${limit}`;
 
   try {
     const aeResponse = await fetch(
@@ -500,7 +500,6 @@ async function handleAdminDebug(env: Env, params: URLSearchParams): Promise<Resp
 async function handleMaLatest(env: Env, params: URLSearchParams): Promise<Response> {
   const period = params.get('period');
   const exchange = params.get('exchange');
-  const limit = Math.min(parseInt(params.get('limit') || '5000'), 10000);
 
   let query = 'SELECT * FROM funding_ma_v4';
   const conditions: string[] = [];
@@ -510,8 +509,7 @@ async function handleMaLatest(env: Env, params: URLSearchParams): Promise<Respon
   if (exchange) { conditions.push('exchange = ?'); bindings.push(exchange); }
 
   if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
-  query += ' ORDER BY ma_apr DESC LIMIT ?';
-  bindings.push(limit);
+  query += ' ORDER BY ma_apr DESC';
 
   const result = await env.DB_V4.prepare(query).bind(...bindings).all();
   return jsonSuccess({ data: result.results, count: result.results.length });
